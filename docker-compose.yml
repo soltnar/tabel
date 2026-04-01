@@ -1,0 +1,9 @@
+version: "3.9"
+
+services:
+  scheduler-app:
+    build: .
+    container_name: schedule-generator
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

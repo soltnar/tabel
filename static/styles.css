@@ -1,0 +1,167 @@
+:root {
+  --bg: #f4f7fb;
+  --card: #ffffff;
+  --text: #1f2a37;
+  --muted: #5c6b7a;
+  --accent: #0b7a75;
+  --accent-hover: #095d59;
+  --border: #dbe5ef;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Arial", sans-serif;
+  background: radial-gradient(circle at top right, #e8f3ff, var(--bg));
+  color: var(--text);
+}
+
+.container {
+  width: min(1100px, 95vw);
+  margin: 24px auto;
+  display: grid;
+  gap: 16px;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(1.5rem, 3vw, 2.2rem);
+}
+
+.subtitle {
+  margin: 0;
+  color: var(--muted);
+}
+
+.version-line {
+  margin: 2px 0 0;
+  color: #4e6277;
+  font-size: 0.9rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 8px 20px rgba(20, 42, 70, 0.06);
+}
+
+h2 {
+  margin-top: 0;
+  font-size: 1.1rem;
+}
+
+.file-label {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--muted);
+}
+
+input[type="file"] {
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: #fafcff;
+}
+
+button {
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.96rem;
+  transition: background 0.15s ease;
+}
+
+button:hover:enabled {
+  background: var(--accent-hover);
+}
+
+button:disabled {
+  background: #a9b6c8;
+  cursor: not-allowed;
+}
+
+.download-buttons {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.status {
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.preview-controls label {
+  color: var(--muted);
+}
+
+.preview-controls select {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #fff;
+  color: var(--text);
+}
+
+.preview-meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 700px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.92rem;
+}
+
+th {
+  background: #f2f8ff;
+}
+
+.row-deficit {
+  background: #ffe8e8;
+}
+
+.row-cross {
+  background: #fff7dc;
+}
+
+@media (max-width: 700px) {
+  .container {
+    width: 96vw;
+    margin: 14px auto;
+  }
+
+  .card {
+    padding: 12px;
+  }
+}

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Генератор графика сотрудников</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Генератор графика сотрудников</h1>
+      <p class="subtitle">
+        Загрузите 2 файла Excel и получите готовый график с учетом ограничений по часам и дням.
+      </p>
+      <p id="appVersion" class="version-line"></p>
+
+      <section class="card">
+        <h2>1. Загрузка файлов</h2>
+
+        <label class="file-label">
+          <span>Расчетные листки (лимит часов/дней)</span>
+          <input id="payrollFile" type="file" accept=".xlsx,.xls" />
+        </label>
+
+        <label class="file-label">
+          <span>Табель (структура дней)</span>
+          <input id="timesheetFile" type="file" accept=".xlsx,.xls" />
+        </label>
+
+        <button id="uploadBtn">Загрузить файлы</button>
+      </section>
+
+      <section class="card">
+        <h2>2. Генерация графика</h2>
+        <button id="generateBtn" disabled>Сгенерировать</button>
+      </section>
+
+      <section class="card">
+        <h2>3. Скачивание результата</h2>
+        <div class="download-buttons">
+          <button id="downloadBtn" disabled>Скачать график (Excel)</button>
+          <button id="downloadT13Btn" disabled>Скачать табель Т-13</button>
+          <button id="downloadLogBtn">Скачать app.log</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Статус</h2>
+        <div id="status" class="status">Ожидание загрузки файлов.</div>
+      </section>
+
+      <section class="card">
+        <h2>Предпросмотр (первые записи)</h2>
+        <div class="preview-controls">
+          <label for="previewFilter">Фильтр:</label>
+          <select id="previewFilter">
+            <option value="all">Все записи</option>
+            <option value="deficit">Только дефицит</option>
+            <option value="cross">Только межресторанные замены</option>
+          </select>
+          <span id="previewMeta" class="preview-meta"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="previewTable">
+            <thead>
+              <tr>
+                <th>День</th>
+                <th>Ресторан</th>
+                <th>Роль</th>
+                <th>Смена</th>
+                <th>Время</th>
+                <th>Часы</th>
+                <th>Сотрудник</th>
+                <th>Базовый ресторан</th>
+                <th>Статус</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
