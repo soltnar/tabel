@@ -15,6 +15,7 @@ class PreparedInput:
     employees: pd.DataFrame
     days: list[int]
     weekend_days: list[int]
+    role_group_defaults: dict[str, str]
     warnings: list[str]
     summary: dict[str, Any]
 
@@ -583,18 +584,30 @@ def prepare_input(
 
     merged["restaurant"] = merged["restaurant"].replace("", "не указан")
     merged["role"] = merged["role"].replace("", "не указана")
-    merged["role"] = merged["role"].map(_map_role_group)
+    merged["role_original"] = merged["role"]
+    merged["role_group"] = merged["role_original"].map(_map_role_group)
 
-    merged = merged[["employee", "restaurant", "role", "max_hours", "max_days"]].copy()
+    merged = merged[
+        ["employee", "restaurant", "role_original", "role_group", "max_hours", "max_days"]
+    ].copy()
     merged["max_hours"] = merged["max_hours"].astype(float)
     merged["max_days"] = merged["max_days"].astype(int)
 
-    merged = merged.sort_values(["restaurant", "role", "employee"]).reset_index(drop=True)
+    merged = merged.sort_values(["restaurant", "role_group", "employee"]).reset_index(drop=True)
+
+    role_group_defaults = (
+        merged[["role_original", "role_group"]]
+        .drop_duplicates()
+        .sort_values(["role_original"])
+        .set_index("role_original")["role_group"]
+        .to_dict()
+    )
 
     summary = {
         "employee_count": int(len(merged)),
         "restaurants": int(merged["restaurant"].nunique()),
-        "roles": int(merged["role"].nunique()),
+        "roles": int(merged["role_original"].nunique()),
+        "role_groups": int(merged["role_group"].nunique()),
         "days_in_template": int(len(days)),
         "weekend_days_in_template": int(len(weekend_days)),
     }
@@ -603,6 +616,7 @@ def prepare_input(
         employees=merged,
         days=days,
         weekend_days=weekend_days,
+        role_group_defaults=role_group_defaults,
         warnings=warnings,
         summary=summary,
     )

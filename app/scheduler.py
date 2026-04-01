@@ -67,7 +67,8 @@ class _EmployeeState:
     def __init__(self, row: pd.Series) -> None:
         self.employee = str(row["employee"])
         self.restaurant = str(row["restaurant"])
-        self.role = str(row["role"])
+        self.role_original = str(row["role_original"])
+        self.role_group = str(row["role_group"])
         self.max_hours = float(row["max_hours"])
         self.max_days = int(row["max_days"])
 
@@ -79,7 +80,7 @@ class _EmployeeState:
 
     @property
     def id(self) -> tuple[str, str, str]:
-        return (self.employee, self.restaurant, self.role)
+        return (self.employee, self.restaurant, self.role_group)
 
 
 def _shift_by_key(key: str) -> Shift:
@@ -322,10 +323,10 @@ def generate_schedule(
 
     by_group: dict[tuple[str, str], list[_EmployeeState]] = defaultdict(list)
     for state in states:
-        by_group[(state.restaurant, state.role)].append(state)
+        by_group[(state.restaurant, state.role_group)].append(state)
 
     target_groups = sorted(by_group.keys(), key=lambda x: (x[0], x[1]))
-    kitchen_pool = [state for state in states if state.role == KITCHEN_ROLE]
+    kitchen_pool = [state for state in states if state.role_group == KITCHEN_ROLE]
 
     assignments: list[dict[str, Any]] = []
     mandatory_deficits: list[dict[str, Any]] = []
@@ -339,14 +340,14 @@ def generate_schedule(
     total_days = len(sorted_days)
 
     for day_rank, day in enumerate(sorted_days, start=1):
-        for restaurant, role in target_groups:
-            primary_pool = by_group[(restaurant, role)]
+        for restaurant, role_group in target_groups:
+            primary_pool = by_group[(restaurant, role_group)]
             fallback_pool: list[_EmployeeState] = []
 
-            if role == KITCHEN_ROLE:
+            if role_group == KITCHEN_ROLE:
                 fallback_pool = [emp for emp in kitchen_pool if emp.restaurant != restaurant]
 
-            role_is_mandatory = _is_mandatory_coverage_role(role)
+            role_is_mandatory = _is_mandatory_coverage_role(role_group)
 
             for shift_key in MANDATORY_SHIFT_KEYS:
                 shift = _shift_by_key(shift_key)
@@ -354,7 +355,7 @@ def generate_schedule(
                     day=day,
                     shift_key=shift_key,
                     weekend_days=weekend_days_set,
-                    role=role,
+                    role=role_group,
                 )
                 prefer_existing_day = not role_is_mandatory
 
@@ -375,7 +376,9 @@ def generate_schedule(
                                 {
                                     "day": day,
                                     "restaurant": restaurant,
-                                    "role": role,
+                                    "role": role_group,
+                                    "role_group": role_group,
+                                    "role_original": "",
                                     "shift": shift.key,
                                     "shift_label": shift.label,
                                     "start": shift.start,
@@ -392,7 +395,7 @@ def generate_schedule(
                                 {
                                     "day": day,
                                     "restaurant": restaurant,
-                                    "role": role,
+                                    "role": role_group,
                                     "shift": shift.label,
                                 }
                             )
@@ -410,7 +413,9 @@ def generate_schedule(
                         {
                             "day": day,
                             "restaurant": restaurant,
-                            "role": role,
+                            "role": picked.role_original,
+                            "role_group": role_group,
+                            "role_original": picked.role_original,
                             "shift": shift.key,
                             "shift_label": shift.label,
                             "start": shift.start,
@@ -448,13 +453,15 @@ def generate_schedule(
 
                 assignments.append(
                     {
-                        "day": day,
-                        "restaurant": restaurant,
-                        "role": role,
-                        "shift": shift.key,
-                        "shift_label": shift.label,
-                        "start": shift.start,
-                        "end": shift.end,
+                            "day": day,
+                            "restaurant": restaurant,
+                            "role": picked.role_original,
+                            "role_group": role_group,
+                            "role_original": picked.role_original,
+                            "shift": shift.key,
+                            "shift_label": shift.label,
+                            "start": shift.start,
+                            "end": shift.end,
                         "hours": shift.hours,
                         "employee": picked.employee,
                         "employee_home_restaurant": picked.restaurant,
@@ -466,7 +473,7 @@ def generate_schedule(
 
     if assignments:
         assignments_df = pd.DataFrame(assignments).sort_values(
-            ["day", "restaurant", "role", "start", "employee"]
+            ["day", "restaurant", "role_group", "role", "start", "employee"]
         )
     else:
         assignments_df = pd.DataFrame(
@@ -474,6 +481,8 @@ def generate_schedule(
                 "day",
                 "restaurant",
                 "role",
+                "role_group",
+                "role_original",
                 "shift",
                 "shift_label",
                 "start",
@@ -498,7 +507,8 @@ def generate_schedule(
             {
                 "employee": emp.employee,
                 "restaurant": emp.restaurant,
-                "role": emp.role,
+                "role": emp.role_original,
+                "role_group": emp.role_group,
                 "planned_hours": round(emp.used_hours, 2),
                 "planned_days": emp.used_days,
                 "max_hours": round(emp.max_hours, 2),
@@ -517,7 +527,7 @@ def generate_schedule(
     code_order = {"У": 0, "Д": 1, "БЛ": 2, "В": 3}
 
     matrix_index_df = pd.DataFrame(
-        [{"employee": emp.employee, "restaurant": emp.restaurant, "role": emp.role} for emp in states]
+        [{"employee": emp.employee, "restaurant": emp.restaurant, "role": emp.role_original} for emp in states]
     ).drop_duplicates()
 
     matrix_base = assignments_df[
