@@ -10,7 +10,7 @@
     <main class="container">
       <h1>Генератор графика сотрудников</h1>
       <p class="subtitle">
-        Загрузите 2 файла Excel и получите готовый график с учетом ограничений по часам и дням.
+        Загрузите расчетные листки Excel и получите готовый график с учетом ограничений по часам и дням.
       </p>
       <p id="appVersion" class="version-line"></p>
 
@@ -22,16 +22,28 @@
           <input id="payrollFile" type="file" accept=".xlsx,.xls" />
         </label>
 
-        <label class="file-label">
-          <span>Табель (структура дней)</span>
-          <input id="timesheetFile" type="file" accept=".xlsx,.xls" />
-        </label>
-
         <button id="uploadBtn">Загрузить файлы</button>
       </section>
 
       <section class="card">
         <h2>2. Генерация графика</h2>
+        <div id="roleGroupsEditor" class="role-groups-editor hidden">
+          <h3>Группы взаимозаменяемости</h3>
+          <p class="subtitle small">
+            Вы можете вручную распределить должности по группам: Кухня, Зал, Касса, Бар, Обслуживание.
+          </p>
+          <div class="table-wrap">
+            <table id="roleGroupsTable">
+              <thead>
+                <tr>
+                  <th>Должность</th>
+                  <th>Группа</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
         <button id="generateBtn" disabled>Сгенерировать</button>
       </section>
 
@@ -55,9 +67,10 @@
           <label for="previewFilter">Фильтр:</label>
           <select id="previewFilter">
             <option value="all">Все записи</option>
-            <option value="deficit">Только дефицит</option>
+            <option value="deficit">Только дефицит (Т-13)</option>
             <option value="cross">Только межресторанные замены</option>
           </select>
+          <button id="loadMoreBtn" disabled>Загрузить еще</button>
           <span id="previewMeta" class="preview-meta"></span>
         </div>
         <div class="table-wrap">
@@ -68,7 +81,6 @@
                 <th>Ресторан</th>
                 <th>Роль</th>
                 <th>Смена</th>
-                <th>Время</th>
                 <th>Часы</th>
                 <th>Сотрудник</th>
                 <th>Базовый ресторан</th>

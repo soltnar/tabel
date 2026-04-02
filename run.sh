@@ -25,7 +25,7 @@ fi
 source .venv/bin/activate
 
 NEED_INSTALL=0
-if ! python3 -c 'import importlib.util,sys;mods=["fastapi","uvicorn","pandas","openpyxl","multipart"];sys.exit(0 if all(importlib.util.find_spec(m) for m in mods) else 1)'; then
+if ! python3 -c 'import importlib.util,sys;mods=["fastapi","uvicorn","pandas","openpyxl","multipart","holidays"];sys.exit(0 if all(importlib.util.find_spec(m) for m in mods) else 1)'; then
   NEED_INSTALL=1
 fi
 

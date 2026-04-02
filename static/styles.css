@@ -36,6 +36,10 @@ h1 {
   color: var(--muted);
 }
 
+.subtitle.small {
+  font-size: 0.9rem;
+}
+
 .version-line {
   margin: 2px 0 0;
   color: #4e6277;
@@ -102,6 +106,28 @@ button:disabled {
 
 .table-wrap {
   overflow-x: auto;
+}
+
+.hidden {
+  display: none;
+}
+
+.role-groups-editor {
+  margin-bottom: 14px;
+}
+
+.role-groups-editor h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+
+.role-groups-editor select {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #fff;
+  color: var(--text);
+  min-width: 180px;
 }
 
 .preview-controls {

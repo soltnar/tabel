@@ -4,10 +4,25 @@ from dataclasses import dataclass
 from io import BytesIO
 from collections import defaultdict
 from typing import Any, Optional
+from datetime import date
+import calendar
 import math
 import re
 
 import pandas as pd
+
+ROLE_GROUP_KITCHEN = "Кухня"
+ROLE_GROUP_HALL = "Зал"
+ROLE_GROUP_CASH = "Касса"
+ROLE_GROUP_BAR = "Бар"
+ROLE_GROUP_SERVICE = "Обслуживание"
+ROLE_GROUP_CHOICES = [
+    ROLE_GROUP_KITCHEN,
+    ROLE_GROUP_HALL,
+    ROLE_GROUP_CASH,
+    ROLE_GROUP_BAR,
+    ROLE_GROUP_SERVICE,
+]
 
 
 @dataclass
@@ -33,6 +48,18 @@ def _normalize_text(value: Any) -> str:
 def _normalize_for_search(value: Any) -> str:
     text = _normalize_text(value)
     return re.sub(r"[^a-zа-я0-9]+", "", text)
+
+
+def _normalize_restaurant(value: Any) -> str:
+    text = _normalize_text(value)
+    if not text:
+        return ""
+
+    # Унификация адресов: одно и то же место с разными "пом./помещение" считаем одним рестораном.
+    # Пример: "пр-т циолковского, 19 а пом.1" и "пр-т циолковского, 19 а пом.3".
+    text = re.sub(r"[, ]+\bпом(?:\.|ещение)?\s*[\w-]+\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" ,.-")
+    return text
 
 
 def _extract_number(value: Any) -> float | None:
@@ -89,12 +116,21 @@ def _map_role_group(value: Any) -> str:
     if not role:
         return "не указана"
 
+    # Явные пользовательские дефолты (приоритет над общими правилами).
+    if "бар-менеджер" in role or "бар менеджер" in role:
+        return ROLE_GROUP_BAR
+    if "директор" in role:
+        return ROLE_GROUP_SERVICE
+    if "управляющий по производству и учету" in role:
+        return ROLE_GROUP_KITCHEN
+    if "подсобный рабочий" in role:
+        return ROLE_GROUP_KITCHEN
+
     admin_tokens = (
         "администратор",
         "адмистратор",
         "кассир",
         "менеджер",
-        "управляющ",
     )
     kitchen_tokens = (
         "повар",
@@ -104,6 +140,8 @@ def _map_role_group(value: Any) -> str:
         "су шеф",
         "шеф-повар",
         "шеф повар",
+        "подсоб",
+        "управляющ по производству",
     )
     bar_tokens = (
         "бармен",
@@ -118,18 +156,18 @@ def _map_role_group(value: Any) -> str:
     )
 
     if any(token in role for token in admin_tokens):
-        return "админ/касса/управление"
+        return ROLE_GROUP_CASH
 
     if any(token in role for token in kitchen_tokens):
-        return "кухня (повар/шеф/су-шеф)"
+        return ROLE_GROUP_KITCHEN
 
     if any(token in role for token in bar_tokens):
-        return "бар (бармен/бар-менеджер)"
+        return ROLE_GROUP_BAR
 
     if any(token in role for token in hall_tokens):
-        return "зал (официант/хостес/раннер)"
+        return ROLE_GROUP_HALL
 
-    return role
+    return ROLE_GROUP_SERVICE
 
 
 def _find_columns(columns: list[Any], patterns: dict[str, list[str]]) -> dict[str, str]:
@@ -228,7 +266,7 @@ def parse_employee_list(file_bytes: bytes) -> pd.DataFrame:
     result.columns = ["employee", "restaurant", "role"]
 
     result["employee"] = result["employee"].map(_clean_employee_name)
-    result["restaurant"] = result["restaurant"].map(_normalize_text)
+    result["restaurant"] = result["restaurant"].map(_normalize_restaurant)
     result["role"] = result["role"].map(_normalize_text)
 
     result = result[result["employee"] != ""]
@@ -253,6 +291,8 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
         current_role = "не указана"
         block_days: list[float] = []
         block_hours: list[float] = []
+        detected_days_col: Optional[int] = None
+        detected_hours_col: Optional[int] = None
 
         def flush_block() -> None:
             nonlocal block_days, block_hours, current_employee, current_restaurant, current_role
@@ -273,9 +313,11 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
                 rows.append(
                     {
                         "employee": current_employee,
+                        "payroll_hours": float(max_hours),
+                        "payroll_days": float(max_days),
                         "max_hours": float(max_hours),
                         "max_days": int(round(max_days)),
-                        "restaurant": _normalize_text(current_restaurant) or "не указан",
+                        "restaurant": _normalize_restaurant(current_restaurant) or "не указан",
                         "role": _normalize_text(current_role) or "не указана",
                     }
                 )
@@ -308,9 +350,27 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
             if detected_role:
                 current_role = detected_role
 
-            # В структуре расчетного листка дни/часы чаще всего в колонках 10/12
-            days_val = _extract_number(row.iloc[10] if len(row) > 10 else None)
-            hours_val = _extract_number(row.iloc[12] if len(row) > 12 else None)
+            # Определяем реальные колонки "Дни/Часы" по заголовку строки.
+            if detected_days_col is None or detected_hours_col is None:
+                normalized_row = [_normalize_text(v) for v in row_values]
+                day_candidate: Optional[int] = None
+                hour_candidate: Optional[int] = None
+                for col_idx, token in enumerate(normalized_row):
+                    if not token:
+                        continue
+                    if day_candidate is None and ("дни" in token or token == "дн"):
+                        day_candidate = col_idx
+                    if hour_candidate is None and ("часы" in token or "час" in token):
+                        hour_candidate = col_idx
+                if day_candidate is not None and hour_candidate is not None:
+                    detected_days_col = day_candidate
+                    detected_hours_col = hour_candidate
+
+            # Fallback для нестандартной верстки расчетного листка.
+            days_col = detected_days_col if detected_days_col is not None else 10
+            hours_col = detected_hours_col if detected_hours_col is not None else 12
+            days_val = _extract_number(row.iloc[days_col] if len(row) > days_col else None)
+            hours_val = _extract_number(row.iloc[hours_col] if len(row) > hours_col else None)
 
             if days_val is None and hours_val is None:
                 continue
@@ -344,6 +404,8 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
     result = (
         result.groupby("employee", as_index=False)
         .agg(
+            payroll_hours=("payroll_hours", "max"),
+            payroll_days=("payroll_days", "max"),
             max_hours=("max_hours", "max"),
             max_days=("max_days", "max"),
             restaurant=("restaurant", lambda s: _pick_text_or_default(s, "не указан")),
@@ -396,7 +458,7 @@ def parse_payroll(file_bytes: bytes) -> pd.DataFrame:
     result = result[result["employee"] != ""]
 
     if "restaurant" in optional_mapping:
-        result["restaurant"] = df[optional_mapping["restaurant"]].map(_normalize_text)
+        result["restaurant"] = df[optional_mapping["restaurant"]].map(_normalize_restaurant)
     else:
         result["restaurant"] = "не указан"
 
@@ -543,13 +605,173 @@ def parse_calendar_from_timesheet(file_bytes: bytes) -> tuple[list[int], list[in
     return sorted(day_candidates), sorted(weekend_days)
 
 
+MONTH_NAME_TO_NUM = {
+    "январ": 1,
+    "феврал": 2,
+    "март": 3,
+    "апрел": 4,
+    "ма": 5,  # май/мая
+    "июн": 6,
+    "июл": 7,
+    "август": 8,
+    "сентябр": 9,
+    "октябр": 10,
+    "ноябр": 11,
+    "декабр": 12,
+}
+
+
+def _extract_month_year_from_text(text: str) -> Optional[tuple[int, int]]:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return None
+
+    # Пример: "01.2025" / "1-2025"
+    month_year = re.search(r"\b(0?[1-9]|1[0-2])[./-](20\d{2})\b", normalized)
+    if month_year:
+        return int(month_year.group(2)), int(month_year.group(1))
+
+    # Пример: "за январь 2025"
+    year_match = re.search(r"\b(20\d{2})(?:\s*г(?:\.|ода)?)?\b", normalized)
+    if year_match:
+        year = int(year_match.group(1))
+        for token, month in MONTH_NAME_TO_NUM.items():
+            if token in normalized:
+                return year, month
+
+    return None
+
+
+def _detect_payroll_period(file_bytes: bytes, filename: Optional[str] = None) -> Optional[tuple[int, int]]:
+    votes: dict[tuple[int, int], int] = defaultdict(int)
+
+    if filename:
+        pair = _extract_month_year_from_text(filename)
+        if pair:
+            votes[pair] += 3
+
+    workbook = pd.read_excel(BytesIO(file_bytes), sheet_name=None, header=None, dtype=object)
+    for _, df in workbook.items():
+        if df.empty:
+            continue
+
+        # Смотрим первые строки, где обычно есть шапка периода.
+        sample_df = df.head(40)
+        for value in sample_df.to_numpy().flatten():
+            if value is None or pd.isna(value):
+                continue
+
+            if isinstance(value, pd.Timestamp):
+                votes[(int(value.year), int(value.month))] += 2
+                continue
+
+            if hasattr(value, "year") and hasattr(value, "month"):
+                try:
+                    votes[(int(value.year), int(value.month))] += 2
+                    continue
+                except Exception:
+                    pass
+
+            text = str(value).strip()
+            if not text:
+                continue
+
+            # Полная дата: 31.01.2025
+            full_date = re.search(r"\b([0-3]?\d)[./-](0?[1-9]|1[0-2])[./-](20\d{2})\b", text)
+            if full_date:
+                votes[(int(full_date.group(3)), int(full_date.group(2)))] += 2
+                continue
+
+            pair = _extract_month_year_from_text(text)
+            if pair:
+                votes[pair] += 1
+
+    if not votes:
+        return None
+    return max(votes.items(), key=lambda item: item[1])[0]
+
+
+def _russian_fixed_holidays(year: int) -> set[date]:
+    holidays: set[date] = set()
+
+    # Федеральные праздничные дни (фиксированные даты).
+    for day in range(1, 9):
+        holidays.add(date(year, 1, day))
+    holidays.add(date(year, 2, 23))
+    holidays.add(date(year, 3, 8))
+    holidays.add(date(year, 5, 1))
+    holidays.add(date(year, 5, 9))
+    holidays.add(date(year, 6, 12))
+    holidays.add(date(year, 11, 4))
+
+    return holidays
+
+
+def _russian_holidays_with_observed(year: int) -> set[date]:
+    """
+    Возвращает праздничные/нерабочие дни РФ с учетом переносов выходных
+    (observed), если доступна библиотека holidays.
+    """
+    try:
+        import holidays  # type: ignore
+    except Exception:
+        return _russian_fixed_holidays(year)
+
+    result: set[date] = set()
+    try:
+        ru_holidays = holidays.country_holidays("RU", years=[year], observed=True)
+        for dt in ru_holidays.keys():
+            if isinstance(dt, date):
+                result.add(dt)
+    except Exception:
+        return _russian_fixed_holidays(year)
+
+    if not result:
+        return _russian_fixed_holidays(year)
+    return result
+
+
+def parse_calendar_from_payroll(
+    payroll_df: pd.DataFrame,
+    payroll_bytes: Optional[bytes] = None,
+    payroll_filename: Optional[str] = None,
+) -> tuple[list[int], list[int]]:
+    del payroll_df  # календарь читается из шапки файла и периода, а не из агрегированных строк.
+
+    detected_period = _detect_payroll_period(payroll_bytes, payroll_filename) if payroll_bytes else None
+    if detected_period is None:
+        # Fallback: если период не нашли, оставляем прежнее поведение.
+        days = list(range(1, 32))
+        weekend_days = [day for day in days if day % 7 in (6, 0)]
+        return days, weekend_days
+
+    year, month = detected_period
+    month_days = calendar.monthrange(year, month)[1]
+    days = list(range(1, month_days + 1))
+
+    holidays_with_observed = _russian_holidays_with_observed(year)
+    weekend_days = []
+    for day in days:
+        current = date(year, month, day)
+        is_weekend = current.weekday() >= 5
+        is_holiday = current in holidays_with_observed
+        if is_weekend or is_holiday:
+            weekend_days.append(day)
+
+    return days, sorted(set(weekend_days))
+
+
 def prepare_input(
     payroll_bytes: bytes,
-    timesheet_bytes: bytes,
+    payroll_filename: Optional[str] = None,
     employees_bytes: Optional[bytes] = None,
 ) -> PreparedInput:
     payroll_df = parse_payroll(payroll_bytes)
-    days, weekend_days = parse_calendar_from_timesheet(timesheet_bytes)
+    days, weekend_days = parse_calendar_from_payroll(
+        payroll_df=payroll_df,
+        payroll_bytes=payroll_bytes,
+        payroll_filename=payroll_filename,
+    )
 
     merged = payroll_df.copy()
     warnings: list[str] = []
@@ -565,7 +787,7 @@ def prepare_input(
         merged["role"] = merged["role_file"].fillna(merged["role"])
         merged = merged.drop(columns=["restaurant_file", "role_file"])
 
-    merged["restaurant"] = merged["restaurant"].fillna("не указан").map(_normalize_text)
+    merged["restaurant"] = merged["restaurant"].fillna("не указан").map(_normalize_restaurant)
     merged["role"] = merged["role"].fillna("не указана").map(_normalize_text)
 
     missing_restaurant = (merged["restaurant"] == "").sum()
@@ -608,6 +830,10 @@ def prepare_input(
         "restaurants": int(merged["restaurant"].nunique()),
         "roles": int(merged["role_original"].nunique()),
         "role_groups": int(merged["role_group"].nunique()),
+        "available_role_groups": ROLE_GROUP_CHOICES,
+        "days_in_payroll": int(len(days)),
+        "weekend_days_in_payroll": int(len(weekend_days)),
+        # Backward compatibility for old frontend keys.
         "days_in_template": int(len(days)),
         "weekend_days_in_template": int(len(weekend_days)),
     }

@@ -1,5 +1,4 @@
 const payrollInput = document.getElementById("payrollFile");
-const timesheetInput = document.getElementById("timesheetFile");
 
 const uploadBtn = document.getElementById("uploadBtn");
 const generateBtn = document.getElementById("generateBtn");
@@ -9,10 +8,18 @@ const downloadLogBtn = document.getElementById("downloadLogBtn");
 const previewFilter = document.getElementById("previewFilter");
 const previewMeta = document.getElementById("previewMeta");
 const appVersionNode = document.getElementById("appVersion");
+const roleGroupsEditor = document.getElementById("roleGroupsEditor");
+const roleGroupsBody = document.querySelector("#roleGroupsTable tbody");
+const loadMoreBtn = document.getElementById("loadMoreBtn");
 
 const statusNode = document.getElementById("status");
 const previewBody = document.querySelector("#previewTable tbody");
 let previewRows = [];
+let previewTotal = 0;
+let previewNextOffset = 0;
+let previewPageSize = 150;
+let roleGroupOverrides = {};
+let availableRoleGroups = ["Кухня", "Зал", "Касса", "Бар", "Обслуживание"];
 
 function setStatus(text) {
   statusNode.textContent = text;
@@ -48,7 +55,7 @@ function renderPreview(rows, totalRowsCount = rows.length) {
   if (!rows || rows.length === 0) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 9;
+    td.colSpan = 8;
     td.textContent = "Нет данных для отображения.";
     tr.appendChild(td);
     previewBody.appendChild(tr);
@@ -63,7 +70,7 @@ function renderPreview(rows, totalRowsCount = rows.length) {
       tr.classList.add("row-cross");
     }
 
-    let statusText = "ОК";
+    let statusText = row.status || "ОК";
     if (row.deficit) {
       statusText = "ДЕФИЦИТ";
     } else if (row.cross_restaurant) {
@@ -75,7 +82,6 @@ function renderPreview(rows, totalRowsCount = rows.length) {
       row.restaurant,
       row.role,
       row.shift_label,
-      `${row.start}-${row.end}`,
       row.hours,
       row.employee,
       row.employee_home_restaurant || "-",
@@ -97,12 +103,63 @@ function renderFilteredPreview() {
   renderPreview(rows, previewRows.length);
 }
 
+function updateLoadMoreButton() {
+  const hasMore = previewNextOffset < previewTotal;
+  loadMoreBtn.disabled = !hasMore;
+  loadMoreBtn.textContent = hasMore
+    ? `Загрузить еще (${previewRows.length}/${previewTotal})`
+    : `Все загружено (${previewRows.length}/${previewTotal})`;
+}
+
+function renderRoleGroupsEditor(defaults) {
+  roleGroupsBody.innerHTML = "";
+  roleGroupOverrides = { ...defaults };
+
+  const roles = Object.keys(defaults).sort((a, b) => a.localeCompare(b, "ru"));
+  if (!roles.length) {
+    roleGroupsEditor.classList.add("hidden");
+    return;
+  }
+
+  for (const role of roles) {
+    const tr = document.createElement("tr");
+
+    const roleTd = document.createElement("td");
+    roleTd.textContent = role;
+    tr.appendChild(roleTd);
+
+    const groupTd = document.createElement("td");
+    const select = document.createElement("select");
+    select.dataset.role = role;
+
+    for (const groupName of availableRoleGroups) {
+      const option = document.createElement("option");
+      option.value = groupName;
+      option.textContent = groupName;
+      if (defaults[role] === groupName) {
+        option.selected = true;
+      }
+      select.appendChild(option);
+    }
+
+    select.addEventListener("change", (event) => {
+      const selected = event.target.value;
+      roleGroupOverrides[role] = selected;
+    });
+
+    groupTd.appendChild(select);
+    tr.appendChild(groupTd);
+    roleGroupsBody.appendChild(tr);
+  }
+
+  roleGroupsEditor.classList.remove("hidden");
+}
+
 uploadBtn.addEventListener("click", async () => {
   const payrollFile = payrollInput.files[0];
-  const timesheetFile = timesheetInput.files[0];
 
-  if (!payrollFile || !timesheetFile) {
-    setStatus("Выберите 2 файла (расчетные листки и табель) перед загрузкой.");
+  if (!payrollFile) {
+    setStatus("Выберите файл расчетных листков перед загрузкой.");
     return;
   }
 
@@ -113,7 +170,6 @@ uploadBtn.addEventListener("click", async () => {
 
   const formData = new FormData();
   formData.append("payroll_file", payrollFile);
-  formData.append("timesheet_file", timesheetFile);
 
   try {
     const response = await fetch("/upload", {
@@ -130,16 +186,25 @@ uploadBtn.addEventListener("click", async () => {
       ? `\nПредупреждения:\n- ${data.warnings.join("\n- ")}`
       : "";
 
+    if (Array.isArray(data.summary?.available_role_groups) && data.summary.available_role_groups.length) {
+      availableRoleGroups = data.summary.available_role_groups;
+    }
+    renderRoleGroupsEditor(data.role_group_defaults || {});
+
     setStatus(
       `${data.message}\n` +
-        `Сотрудников: ${data.summary.employee_count}, ресторанов: ${data.summary.restaurants}, ролей: ${data.summary.roles}, дней: ${data.summary.days_in_template}, выходных в шаблоне: ${data.summary.weekend_days_in_template ?? 0}.` +
+        `Сотрудников: ${data.summary.employee_count}, ресторанов: ${data.summary.restaurants}, ролей: ${data.summary.roles}, дней: ${data.summary.days_in_payroll ?? data.summary.days_in_template}, выходных: ${data.summary.weekend_days_in_payroll ?? data.summary.weekend_days_in_template ?? 0}.` +
         warnings
     );
 
     generateBtn.disabled = false;
     previewRows = [];
+    previewTotal = 0;
+    previewNextOffset = 0;
+    previewPageSize = 150;
     previewFilter.value = "all";
     renderFilteredPreview();
+    updateLoadMoreButton();
   } catch (error) {
     setStatus(`Ошибка: ${error.message}`);
   }
@@ -154,6 +219,10 @@ generateBtn.addEventListener("click", async () => {
   try {
     const response = await fetch("/generate", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        role_group_overrides: roleGroupOverrides,
+      }),
     });
 
     const data = await response.json();
@@ -172,7 +241,13 @@ generateBtn.addEventListener("click", async () => {
     );
 
     previewRows = data.preview || [];
+    previewTotal = Number.isFinite(data.preview_total) ? data.preview_total : previewRows.length;
+    previewPageSize = Number.isFinite(data.preview_page_size) ? data.preview_page_size : 150;
+    previewNextOffset = Number.isFinite(data.preview_next_offset)
+      ? data.preview_next_offset
+      : previewRows.length;
     renderFilteredPreview();
+    updateLoadMoreButton();
     downloadBtn.disabled = false;
     downloadT13Btn.disabled = false;
   } catch (error) {
@@ -192,6 +267,43 @@ downloadT13Btn.addEventListener("click", () => {
 
 downloadLogBtn.addEventListener("click", () => {
   window.location.href = "/download_log";
+});
+
+loadMoreBtn.addEventListener("click", async () => {
+  if (previewNextOffset >= previewTotal) {
+    updateLoadMoreButton();
+    return;
+  }
+
+  loadMoreBtn.disabled = true;
+  const previousText = loadMoreBtn.textContent;
+  loadMoreBtn.textContent = "Загрузка...";
+
+  try {
+    const params = new URLSearchParams({
+      offset: String(previewNextOffset),
+      limit: String(previewPageSize),
+    });
+    const response = await fetch(`/preview?${params.toString()}`);
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(formatApiDetail(data.detail) || "Ошибка подгрузки записей");
+    }
+
+    const rows = data.rows || [];
+    previewRows = previewRows.concat(rows);
+    previewTotal = Number.isFinite(data.total) ? data.total : previewTotal;
+    previewNextOffset = Number.isFinite(data.next_offset)
+      ? data.next_offset
+      : previewRows.length;
+
+    renderFilteredPreview();
+    updateLoadMoreButton();
+  } catch (error) {
+    setStatus(`Ошибка: ${error.message}`);
+    loadMoreBtn.textContent = previousText;
+    updateLoadMoreButton();
+  }
 });
 
 previewFilter.addEventListener("change", renderFilteredPreview);
