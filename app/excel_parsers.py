@@ -30,6 +30,8 @@ class PreparedInput:
     employees: pd.DataFrame
     days: list[int]
     weekend_days: list[int]
+    period_year: Optional[int]
+    period_month: Optional[int]
     role_group_defaults: dict[str, str]
     warnings: list[str]
     summary: dict[str, Any]
@@ -82,6 +84,16 @@ def _clean_employee_name(value: Any) -> str:
     # Удаляем код сотрудника в скобках: "Иванов Иван (00123)" -> "Иванов Иван"
     text = re.sub(r"\s*\(\s*\d+\s*\)\s*$", "", text).strip()
     return text
+
+
+def _extract_tab_number(value: Any) -> str:
+    text = _normalize_text(value)
+    if not text:
+        return ""
+    match = re.search(r"\(\s*(\d+)\s*\)\s*$", text)
+    if not match:
+        return ""
+    return str(match.group(1)).strip()
 
 
 def _pick_text_or_default(values: pd.Series, default: str) -> str:
@@ -287,22 +299,87 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
             continue
 
         current_employee = ""
+        current_tab_number = ""
         current_restaurant = "не указан"
         current_role = "не указана"
         block_days: list[float] = []
         block_hours: list[float] = []
+        # Приоритетные значения: фактически оплаченные/отработанные за месяц.
+        block_days_priority: list[float] = []
+        block_hours_priority: list[float] = []
+        first_half_pay: float = 0.0
+        second_half_pay: float = 0.0
         detected_days_col: Optional[int] = None
         detected_hours_col: Optional[int] = None
 
+        def _extract_last_money_from_row(values: list[Any]) -> Optional[float]:
+            # Сначала берем реальные числовые ячейки (обычно колонка "Сумма").
+            typed_values: list[float] = []
+            for cell in values:
+                if cell is None or pd.isna(cell):
+                    continue
+                if isinstance(cell, (int, float)):
+                    value = float(cell)
+                    if value >= 100:
+                        typed_values.append(value)
+            if typed_values:
+                return typed_values[-1]
+
+            # Фолбэк: парсим строковые значения, игнорируя номера ведомостей "№...".
+            parsed_values: list[float] = []
+            for cell in values:
+                if cell is None or pd.isna(cell):
+                    continue
+                raw = str(cell)
+                if "№" in raw:
+                    continue
+                text = raw.replace("\u00a0", " ").replace(" ", "").replace(",", ".")
+                for token in re.findall(r"-?\d+(?:\.\d+)?", text):
+                    try:
+                        value = float(token)
+                    except ValueError:
+                        continue
+                    if value >= 100:
+                        parsed_values.append(value)
+            if not parsed_values:
+                return None
+            return parsed_values[-1]
+
         def flush_block() -> None:
-            nonlocal block_days, block_hours, current_employee, current_restaurant, current_role
+            nonlocal block_days
+            nonlocal block_hours
+            nonlocal block_days_priority
+            nonlocal block_hours_priority
+            nonlocal current_employee
+            nonlocal current_tab_number
+            nonlocal current_restaurant
+            nonlocal current_role
+            nonlocal first_half_pay
+            nonlocal second_half_pay
             if not current_employee:
                 block_days = []
                 block_hours = []
+                block_days_priority = []
+                block_hours_priority = []
+                first_half_pay = 0.0
+                second_half_pay = 0.0
                 return
 
-            max_days = max(block_days) if block_days else 0.0
-            max_hours = max(block_hours) if block_hours else 0.0
+            source_days = block_days_priority if block_days_priority else block_days
+            source_hours = block_hours_priority if block_hours_priority else block_hours
+            max_days = max(source_days) if source_days else 0.0
+            max_hours = max(source_hours) if source_hours else 0.0
+
+            half_preference = "neutral"
+            if first_half_pay > 0 and second_half_pay > 0:
+                if first_half_pay > second_half_pay * 1.05:
+                    half_preference = "first"
+                elif second_half_pay > first_half_pay * 1.05:
+                    half_preference = "second"
+            elif first_half_pay > 0 and second_half_pay <= 0:
+                half_preference = "first"
+            elif second_half_pay > 0 and first_half_pay <= 0:
+                half_preference = "second"
 
             if max_days <= 0 and max_hours > 0:
                 max_days = math.ceil(max_hours / 8.0)
@@ -319,11 +396,19 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
                         "max_days": int(round(max_days)),
                         "restaurant": _normalize_restaurant(current_restaurant) or "не указан",
                         "role": _normalize_text(current_role) or "не указана",
+                        "tab_number": str(current_tab_number or ""),
+                        "first_half_pay": float(first_half_pay),
+                        "second_half_pay": float(second_half_pay),
+                        "half_preference": half_preference,
                     }
                 )
 
             block_days = []
             block_hours = []
+            block_days_priority = []
+            block_hours_priority = []
+            first_half_pay = 0.0
+            second_half_pay = 0.0
 
         for row_idx in range(len(df)):
             row = df.iloc[row_idx]
@@ -334,6 +419,7 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
             if col0_text and re.search(r"\(\s*\d+\s*\)\s*$", col0_text):
                 flush_block()
                 current_employee = _clean_employee_name(col0_text)
+                current_tab_number = _extract_tab_number(col0_text)
                 current_restaurant = "не указан"
                 current_role = "не указана"
                 continue
@@ -371,29 +457,61 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
             hours_col = detected_hours_col if detected_hours_col is not None else 12
             days_val = _extract_number(row.iloc[days_col] if len(row) > days_col else None)
             hours_val = _extract_number(row.iloc[hours_col] if len(row) > hours_col else None)
+            normalized_row = [_normalize_text(v) for v in row_values]
+            row_text = " ".join(token for token in normalized_row if token)
+
+            if "за первую половину" in row_text:
+                amount = _extract_last_money_from_row(row_values)
+                if amount:
+                    first_half_pay = max(first_half_pay, amount)
+            elif ("за вторую половину" in row_text) or ("зарплата (банк" in row_text):
+                amount = _extract_last_money_from_row(row_values)
+                if amount:
+                    second_half_pay = max(second_half_pay, amount)
 
             if days_val is None and hours_val is None:
                 continue
 
+            if "оклад (тариф)" in row_text or "оклад(тариф)" in row_text:
+                continue
+
             is_relevant_line = any(
-                token in col0_text
+                token in row_text
                 for token in (
                     "оплата",
                     "оклад",
                     "тариф",
                     "час",
                     "смен",
-                    "норма",
+                    "рабочие",
                 )
             )
             # Иногда col0 может быть пустым — тогда берём любые адекватные численные значения
             if not is_relevant_line and col0_text:
                 continue
 
+            is_priority_line = any(
+                token in row_text
+                for token in (
+                    "оплата по окладу",
+                    "оплата",
+                    "начислено",
+                    "отработано",
+                    "рабочие",
+                )
+            ) and ("норма" not in row_text)
+            is_norm_only_line = ("норма" in row_text) and (not is_priority_line)
+            if is_norm_only_line:
+                continue
+
             if days_val is not None and 0 < days_val <= 31:
                 block_days.append(days_val)
+                if is_priority_line:
+                    block_days_priority.append(days_val)
             if hours_val is not None and 0 < hours_val <= 400:
                 block_hours.append(hours_val)
+                if is_priority_line:
+                    block_hours_priority.append(hours_val)
 
         flush_block()
 
@@ -410,6 +528,15 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
             max_days=("max_days", "max"),
             restaurant=("restaurant", lambda s: _pick_text_or_default(s, "не указан")),
             role=("role", lambda s: _pick_text_or_default(s, "не указана")),
+            tab_number=("tab_number", lambda s: _pick_text_or_default(s, "")),
+            first_half_pay=("first_half_pay", "max"),
+            second_half_pay=("second_half_pay", "max"),
+            half_preference=(
+                "half_preference",
+                lambda s: "first"
+                if "first" in set(s)
+                else ("second" if "second" in set(s) else "neutral"),
+            ),
         )
         .reset_index(drop=True)
     )
@@ -466,6 +593,7 @@ def parse_payroll(file_bytes: bytes) -> pd.DataFrame:
         result["role"] = df[optional_mapping["role"]].map(_normalize_text)
     else:
         result["role"] = "не указана"
+    result["tab_number"] = ""
 
     result["max_hours"] = result["max_hours"].map(_extract_number)
     result["max_days"] = result["max_days"].map(_extract_number)
@@ -488,6 +616,7 @@ def parse_payroll(file_bytes: bytes) -> pd.DataFrame:
             max_days=("max_days", "sum"),
             restaurant=("restaurant", lambda s: _pick_text_or_default(s, "не указан")),
             role=("role", lambda s: _pick_text_or_default(s, "не указана")),
+            tab_number=("tab_number", lambda s: _pick_text_or_default(s, "")),
         )
         .reset_index(drop=True)
     )
@@ -767,6 +896,7 @@ def prepare_input(
     employees_bytes: Optional[bytes] = None,
 ) -> PreparedInput:
     payroll_df = parse_payroll(payroll_bytes)
+    detected_period = _detect_payroll_period(payroll_bytes, payroll_filename)
     days, weekend_days = parse_calendar_from_payroll(
         payroll_df=payroll_df,
         payroll_bytes=payroll_bytes,
@@ -806,14 +936,38 @@ def prepare_input(
 
     merged["restaurant"] = merged["restaurant"].replace("", "не указан")
     merged["role"] = merged["role"].replace("", "не указана")
+    if "tab_number" not in merged.columns:
+        merged["tab_number"] = ""
+    merged["tab_number"] = merged["tab_number"].fillna("").astype(str).str.strip()
     merged["role_original"] = merged["role"]
     merged["role_group"] = merged["role_original"].map(_map_role_group)
 
+    if "first_half_pay" not in merged.columns:
+        merged["first_half_pay"] = 0.0
+    if "second_half_pay" not in merged.columns:
+        merged["second_half_pay"] = 0.0
+    if "half_preference" not in merged.columns:
+        merged["half_preference"] = "neutral"
+
     merged = merged[
-        ["employee", "restaurant", "role_original", "role_group", "max_hours", "max_days"]
+        [
+            "employee",
+            "restaurant",
+            "tab_number",
+            "role_original",
+            "role_group",
+            "max_hours",
+            "max_days",
+            "first_half_pay",
+            "second_half_pay",
+            "half_preference",
+        ]
     ].copy()
     merged["max_hours"] = merged["max_hours"].astype(float)
     merged["max_days"] = merged["max_days"].astype(int)
+    merged["first_half_pay"] = pd.to_numeric(merged["first_half_pay"], errors="coerce").fillna(0.0).astype(float)
+    merged["second_half_pay"] = pd.to_numeric(merged["second_half_pay"], errors="coerce").fillna(0.0).astype(float)
+    merged["half_preference"] = merged["half_preference"].astype(str)
 
     merged = merged.sort_values(["restaurant", "role_group", "employee"]).reset_index(drop=True)
 
@@ -842,6 +996,8 @@ def prepare_input(
         employees=merged,
         days=days,
         weekend_days=weekend_days,
+        period_year=detected_period[0] if detected_period else None,
+        period_month=detected_period[1] if detected_period else None,
         role_group_defaults=role_group_defaults,
         warnings=warnings,
         summary=summary,

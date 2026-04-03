@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+import calendar
 from io import BytesIO
 from pathlib import Path
 import re
@@ -73,10 +74,14 @@ class _EmployeeState:
     def __init__(self, row: pd.Series) -> None:
         self.employee = str(row["employee"])
         self.restaurant = str(row["restaurant"])
+        self.tab_number = str(row.get("tab_number", "") or "")
         self.role_original = str(row["role_original"])
         self.role_group = str(row["role_group"])
         self.max_hours = float(row["max_hours"])
         self.max_days = int(row["max_days"])
+        self.first_half_pay = float(pd.to_numeric(row.get("first_half_pay", 0.0), errors="coerce") or 0.0)
+        self.second_half_pay = float(pd.to_numeric(row.get("second_half_pay", 0.0), errors="coerce") or 0.0)
+        self.half_preference = str(row.get("half_preference", "neutral") or "neutral")
 
         self.used_hours = 0.0
         self.used_days = 0
@@ -636,12 +641,16 @@ def generate_schedule(
             {
                 "employee": emp.employee,
                 "restaurant": emp.restaurant,
+                "tab_number": emp.tab_number,
                 "role": emp.role_original,
                 "role_group": emp.role_group,
                 "planned_hours": round(emp.used_hours, 2),
                 "planned_days": emp.used_days,
                 "max_hours": round(emp.max_hours, 2),
                 "max_days": emp.max_days,
+                "first_half_pay": round(emp.first_half_pay, 2),
+                "second_half_pay": round(emp.second_half_pay, 2),
+                "half_preference": emp.half_preference,
                 "hours_ok": emp.used_hours <= emp.max_hours + 1e-9,
                 "days_ok": emp.used_days <= emp.max_days,
                 "cross_restaurant_shifts": int(cross_by_employee.get(emp.employee, 0)),
@@ -732,7 +741,18 @@ def build_preview_rows_t13_aligned(
         day_restaurants_map[key].add(str(row["restaurant"]))
 
     employee_base = (
-        result.employee_summary[["employee", "restaurant", "role", "role_group", "max_days", "max_hours"]]
+        result.employee_summary[
+            [
+                "employee",
+                "restaurant",
+                "tab_number",
+                "role",
+                "role_group",
+                "max_days",
+                "max_hours",
+                "half_preference",
+            ]
+        ]
         .drop_duplicates()
         .sort_values(["restaurant", "role", "employee"])
         .reset_index(drop=True)
@@ -744,6 +764,7 @@ def build_preview_rows_t13_aligned(
         home_restaurant = str(rec["restaurant"])
         role = str(rec["role"])
         role_group = str(rec["role_group"])
+        half_preference = str(rec.get("half_preference", "neutral") or "neutral")
         payroll_days_target = int(pd.to_numeric(rec["max_days"], errors="coerce") or 0)
         payroll_hours_target = float(pd.to_numeric(rec["max_hours"], errors="coerce") or 0.0)
 
@@ -754,6 +775,7 @@ def build_preview_rows_t13_aligned(
             target_count=payroll_days_target,
             prefer_weekends=_is_core_group(role_group),
             weekend_days=weekend_days_set,
+            half_preference=half_preference,
         )
 
         day_hours = _distribute_hours(payroll_hours_target, len(selected_days))
@@ -928,6 +950,7 @@ def _select_employee_days(
     target_count: int,
     prefer_weekends: bool,
     weekend_days: set[int],
+    half_preference: str = "neutral",
 ) -> list[int]:
     if target_count <= 0:
         return []
@@ -965,6 +988,44 @@ def _select_employee_days(
             if len(selected) > target_count:
                 selected = _pick_evenly_from_days(selected, target_count)
 
+    # Персональный приоритет половины месяца по выплатам:
+    # first -> больше дней в 1-15, second -> больше в 16-31.
+    preference = str(half_preference or "neutral").strip().lower()
+    if preference in {"first", "second"} and selected and target_count > 1:
+        first_half_pool = [day for day in all_days if day <= 15]
+        second_half_pool = [day for day in all_days if day >= 16]
+        selected_first = [day for day in selected if day <= 15]
+        selected_second = [day for day in selected if day >= 16]
+
+        target_majority = max(1, round(target_count * 0.6))
+        if preference == "first":
+            required = min(len(first_half_pool), target_majority)
+            if len(selected_first) < required:
+                need = required - len(selected_first)
+                donor = [day for day in sorted(selected_second)]
+                receiver_pool = [day for day in first_half_pool if day not in selected]
+                receiver = _pick_evenly_from_days(receiver_pool, need)
+                for i, day in enumerate(receiver):
+                    if i >= len(donor):
+                        break
+                    selected.remove(donor[i])
+                    selected.append(day)
+        else:
+            required = min(len(second_half_pool), target_majority)
+            if len(selected_second) < required:
+                need = required - len(selected_second)
+                donor = [day for day in sorted(selected_first)]
+                receiver_pool = [day for day in second_half_pool if day not in selected]
+                receiver = _pick_evenly_from_days(receiver_pool, need)
+                for i, day in enumerate(receiver):
+                    if i >= len(donor):
+                        break
+                    selected.remove(donor[i])
+                    selected.append(day)
+        selected = sorted(set(selected))
+        if len(selected) > target_count:
+            selected = _pick_evenly_from_days(selected, target_count)
+
     return sorted(selected)
 
 
@@ -1001,7 +1062,7 @@ def _build_t13_dataframe(result: ScheduleResult, days: list[int]) -> tuple[pd.Da
     ].copy()
 
     employee_base = (
-        result.employee_summary[["employee", "restaurant", "role"]]
+        result.employee_summary[["employee", "restaurant", "tab_number", "role", "role_group", "half_preference"]]
         .drop_duplicates()
         .sort_values(["restaurant", "role", "employee"])
         .reset_index(drop=True)
@@ -1052,6 +1113,8 @@ def _build_t13_dataframe(result: ScheduleResult, days: list[int]) -> tuple[pd.Da
         employee = str(row["employee"])
         restaurant = str(row["restaurant"])
         role = str(row["role"])
+        role_group = str(row.get("role_group", ""))
+        half_preference = str(row.get("half_preference", "neutral") or "neutral")
         base_rest_code = restaurant_codes.get(restaurant, "R00")
         summary_row = result.employee_summary[result.employee_summary["employee"] == employee]
         payroll_days_target = 0
@@ -1059,6 +1122,7 @@ def _build_t13_dataframe(result: ScheduleResult, days: list[int]) -> tuple[pd.Da
         if not summary_row.empty:
             payroll_days_target = int(pd.to_numeric(summary_row.iloc[0]["max_days"], errors="coerce") or 0)
             payroll_hours_target = float(pd.to_numeric(summary_row.iloc[0]["max_hours"], errors="coerce") or 0.0)
+            half_preference = str(summary_row.iloc[0].get("half_preference", half_preference) or half_preference)
 
         row_codes: dict[str, Any] = {
             "№ п/п": idx + 1,
@@ -1074,13 +1138,13 @@ def _build_t13_dataframe(result: ScheduleResult, days: list[int]) -> tuple[pd.Da
         }
 
         factual_days = sorted({day for (emp_key, day) in day_details_map.keys() if emp_key == employee})
-        role_group = str(row.get("role_group", ""))
         selected_days = _select_employee_days(
             factual_days=factual_days,
             all_days=sorted_days,
             target_count=payroll_days_target,
             prefer_weekends=_is_core_group(role_group),
             weekend_days=set(),
+            half_preference=half_preference,
         )
 
         day_hours = _distribute_hours(payroll_hours_target, len(selected_days))
@@ -1246,6 +1310,44 @@ def _find_t13_day_columns(ws) -> tuple[dict[int, int], dict[int, int]]:
     return first_map, second_map
 
 
+def _find_t13_totals_columns(
+    ws,
+    first_half_map: dict[int, int],
+    second_half_map: dict[int, int],
+) -> tuple[Optional[int], Optional[int]]:
+    all_day_cols = list(first_half_map.values()) + list(second_half_map.values())
+    if not all_day_cols:
+        return None, None
+
+    day_grid_end = max(all_day_cols)
+    max_scan_col = min(ws.max_column, day_grid_end + 25)
+    best_pair: Optional[tuple[int, int]] = None
+
+    for row in range(1, min(140, ws.max_row) + 1):
+        found5: list[int] = []
+        found6: list[int] = []
+        for col in range(day_grid_end + 1, max_scan_col + 1):
+            val = ws.cell(row=row, column=col).value
+            text = str(val).strip() if val is not None else ""
+            if text == "5":
+                found5.append(col)
+            elif text == "6":
+                found6.append(col)
+        for c5 in found5:
+            for c6 in found6:
+                if c6 <= c5:
+                    continue
+                if c6 - c5 > 6:
+                    continue
+                pair = (c5, c6)
+                if best_pair is None or pair[0] < best_pair[0]:
+                    best_pair = pair
+
+    if best_pair is None:
+        return None, None
+    return best_pair[0], best_pair[1]
+
+
 def _find_t13_first_employee_row(ws) -> int:
     for row in range(1, min(120, ws.max_row) + 1):
         number = str(ws.cell(row=row, column=2).value or "").strip()
@@ -1289,28 +1391,151 @@ def _find_t13_footer_row(ws, start_scan_row: int) -> Optional[int]:
     return None
 
 
-def _fill_t13_template_sheet(
-    ws,
-    result: ScheduleResult,
-    days: list[int],
-    restaurant_codes: dict[str, str],
-    weekend_days: Optional[set[int]] = None,
-) -> None:
-    sorted_days = sorted({int(day) for day in days})
-    weekend_days_set = set(int(day) for day in (weekend_days or set()))
-    first_half_map, second_half_map = _find_t13_day_columns(ws)
-    start_row = _find_t13_first_employee_row(ws)
-    block_height = 4
+def _resolve_cell_anchor(ws, row: int, col: int) -> tuple[int, int]:
+    cell = ws.cell(row=row, column=col)
+    if cell.__class__.__name__ != "MergedCell":
+        return row, col
+    for merged in ws.merged_cells.ranges:
+        if merged.min_row <= row <= merged.max_row and merged.min_col <= col <= merged.max_col:
+            return merged.min_row, merged.min_col
+    return row, col
 
+
+def _set_cell_value_safe(ws, row: int, col: int, value: Any) -> None:
+    r, c = _resolve_cell_anchor(ws, row, col)
+    ws.cell(row=r, column=c).value = value
+
+
+def _set_cell_comment_safe(ws, row: int, col: int, comment: Optional[Comment]) -> None:
+    r, c = _resolve_cell_anchor(ws, row, col)
+    ws.cell(row=r, column=c).comment = comment
+
+
+def _ensure_continuous_table_for_general_sheet(ws, start_row: int, required_blocks: int) -> list[int]:
+    """
+    Для листа 'Т-13 общий' формирует непрерывную табличную часть (без повторных шапок страниц):
+    при нехватке строк добавляет блоки по 4 строки перед первым футером.
+    """
+    footer_row = _find_t13_footer_row(ws, start_row + 1)
+    if footer_row is None:
+        return [start_row + idx * 4 for idx in range(required_blocks)]
+
+    available_blocks = max(0, (footer_row - start_row) // 4)
+    if required_blocks <= available_blocks:
+        return [start_row + idx * 4 for idx in range(required_blocks)]
+
+    missing_blocks = required_blocks - available_blocks
+    rows_to_insert = missing_blocks * 4
+
+    # Паттерн стилей берём из первого блока сотрудника.
+    style_source_rows = [start_row + i for i in range(4)]
+    max_col = ws.max_column
+
+    # Запоминаем merge-паттерны для одного блока.
+    block_merges: list[tuple[int, int, int, int]] = []
+    for merged in ws.merged_cells.ranges:
+        if start_row <= merged.min_row <= merged.max_row <= start_row + 3:
+            block_merges.append(
+                (
+                    merged.min_row - start_row,
+                    merged.max_row - start_row,
+                    merged.min_col,
+                    merged.max_col,
+                )
+            )
+
+    ws.insert_rows(footer_row, amount=rows_to_insert)
+
+    # Копируем стиль/формат первого блока на новые строки.
+    from copy import copy
+
+    for i in range(rows_to_insert):
+        target_row = footer_row + i
+        src_row = style_source_rows[i % 4]
+        if ws.row_dimensions.get(src_row) and ws.row_dimensions[src_row].height is not None:
+            ws.row_dimensions[target_row].height = ws.row_dimensions[src_row].height
+        for col in range(1, max_col + 1):
+            src_cell = ws.cell(row=src_row, column=col)
+            dst_cell = ws.cell(row=target_row, column=col)
+            dst_cell._style = copy(src_cell._style)
+            dst_cell.number_format = src_cell.number_format
+            dst_cell.font = copy(src_cell.font)
+            dst_cell.fill = copy(src_cell.fill)
+            dst_cell.border = copy(src_cell.border)
+            dst_cell.alignment = copy(src_cell.alignment)
+            dst_cell.protection = copy(src_cell.protection)
+            dst_cell.value = None
+            dst_cell.comment = None
+
+    # Полностью пересобираем merge-структуру в рабочей зоне сотрудников,
+    # чтобы не оставались "чужие" объединения от следующих страниц шаблона.
+    area_end = start_row + required_blocks * 4 - 1
+    to_unmerge = []
+    for merged in ws.merged_cells.ranges:
+        if not (merged.max_row < start_row or merged.min_row > area_end):
+            to_unmerge.append(str(merged))
+    for ref in to_unmerge:
+        ws.unmerge_cells(ref)
+
+    # Восстанавливаем merge-структуру блоками по 4 строки в нужной зоне.
+    for block_idx in range(required_blocks):
+        base_row = start_row + block_idx * 4
+        for min_off, max_off, min_col, max_col in block_merges:
+            ws.merge_cells(
+                start_row=base_row + min_off,
+                end_row=base_row + max_off,
+                start_column=min_col,
+                end_column=max_col,
+            )
+
+    return [start_row + idx * 4 for idx in range(required_blocks)]
+
+
+def _set_t13_report_period(ws, year: Optional[int], month: Optional[int]) -> None:
+    if not year or not month:
+        return
+    from_text = f"01.{int(month):02d}.{int(year)}"
+    last_day = calendar.monthrange(int(year), int(month))[1]
+    to_text = f"{int(last_day):02d}.{int(month):02d}.{int(year)}"
+
+    max_scan_row = min(ws.max_row, 180)
+    max_scan_col = min(ws.max_column, 80)
+    c_col: Optional[int] = None
+    po_col: Optional[int] = None
+    target_row: Optional[int] = None
+
+    for row in range(1, max_scan_row + 1):
+        row_tokens = {}
+        for col in range(1, max_scan_col + 1):
+            text = str(ws.cell(row=row, column=col).value or "").strip().lower()
+            if text:
+                row_tokens[col] = text
+        if not row_tokens:
+            continue
+        for col, text in row_tokens.items():
+            if text == "с":
+                c_col = col
+            elif text == "по":
+                po_col = col
+        if c_col is not None and po_col is not None:
+            target_row = row + 1
+            break
+
+    if target_row is not None and c_col is not None and po_col is not None:
+        _set_cell_value_safe(ws, target_row, c_col, from_text)
+        _set_cell_value_safe(ws, target_row, po_col, to_text)
+
+
+def _find_t13_block_rows(
+    ws,
+    start_row: int,
+    first_half_map: dict[int, int],
+    second_half_map: dict[int, int],
+) -> list[int]:
     def _writable(row: int, col: int) -> bool:
         return ws.cell(row=row, column=col).__class__.__name__ != "MergedCell"
 
-    footer_row = _find_t13_footer_row(ws, start_scan_row=start_row)
-    max_data_row = (footer_row - 1) if footer_row else ws.max_row
-
     def _block_has_valid_day_grid(block_start: int) -> bool:
-        # Для корректного заполнения блок сотрудника должен иметь
-        # полностью доступные ячейки сетки дней в двух половинах месяца.
         for _day, col in first_half_map.items():
             if not (_writable(block_start, col) and _writable(block_start + 1, col)):
                 return False
@@ -1319,19 +1544,75 @@ def _fill_t13_template_sheet(
                 return False
         return True
 
-    block_rows: list[int] = []
-    probe = start_row
-    while probe <= max_data_row - 3:
-        if (
-            _writable(probe, 2)
-            and _writable(probe, 3)
-            and _writable(probe, 5)
-            and _block_has_valid_day_grid(probe)
-        ):
-            block_rows.append(probe)
-            probe += block_height
-        else:
-            probe += 1
+    # 1) Основной путь: берем "якорные" строки сотрудников по шаблонным номерам/ФИО.
+    anchor_rows: list[int] = []
+    for row in range(max(1, start_row - 4), ws.max_row - 3):
+        number = str(ws.cell(row=row, column=2).value or "").strip()
+        fio = str(ws.cell(row=row, column=3).value or "").strip()
+        if not number.isdigit():
+            continue
+        if "(" not in fio:
+            continue
+        if not (_writable(row, 2) and _writable(row, 3)):
+            continue
+        anchor_rows.append(row)
+    if anchor_rows:
+        return sorted(anchor_rows)
+
+    # 2) Fallback: равномерная сетка +4 от первой строки сотрудника.
+    rows: list[int] = []
+    row = start_row
+    while row <= ws.max_row - 3:
+        if _writable(row, 2) and _writable(row, 3) and _writable(row, 5) and _block_has_valid_day_grid(row):
+            rows.append(row)
+        row += 4
+    return rows
+
+
+def _fill_t13_template_sheet(
+    ws,
+    result: ScheduleResult,
+    days: list[int],
+    restaurant_codes: dict[str, str],
+    weekend_days: Optional[set[int]] = None,
+    sort_mode: str = "by_restaurant",
+    continuous_table: bool = False,
+) -> None:
+    sorted_days = sorted({int(day) for day in days})
+    weekend_days_set = set(int(day) for day in (weekend_days or set()))
+    first_half_map, second_half_map = _find_t13_day_columns(ws)
+    totals_col_5, totals_col_6 = _find_t13_totals_columns(ws, first_half_map, second_half_map)
+    start_row = _find_t13_first_employee_row(ws)
+    def _writable(row: int, col: int) -> bool:
+        return ws.cell(row=row, column=col).__class__.__name__ != "MergedCell"
+
+    pre_employee_base = result.employee_summary[
+        [
+            "employee",
+            "restaurant",
+            "tab_number",
+            "role",
+            "role_group",
+            "max_days",
+            "max_hours",
+            "half_preference",
+        ]
+    ].drop_duplicates()
+    needed_blocks = len(pre_employee_base)
+
+    if continuous_table:
+        block_rows = _ensure_continuous_table_for_general_sheet(
+            ws=ws,
+            start_row=start_row,
+            required_blocks=needed_blocks,
+        )
+    else:
+        block_rows = _find_t13_block_rows(
+            ws=ws,
+            start_row=start_row,
+            first_half_map=first_half_map,
+            second_half_map=second_half_map,
+        )
 
     assignments = result.assignments.copy()
     if assignments.empty:
@@ -1348,20 +1629,20 @@ def _fill_t13_template_sheet(
         rest_name = str(row["restaurant"])
         details_map[key].append(rest_name)
 
-    employee_base = (
-        result.employee_summary[["employee", "restaurant", "role", "role_group", "max_days", "max_hours"]]
-        .drop_duplicates()
-        .sort_values(["restaurant", "role", "employee"])
-        .reset_index(drop=True)
-    )
+    employee_base = pre_employee_base.copy()
+    if sort_mode == "alphabetical":
+        employee_base = employee_base.sort_values(["employee", "restaurant", "role"]).reset_index(drop=True)
+    else:
+        employee_base = employee_base.sort_values(["restaurant", "role", "employee"]).reset_index(drop=True)
 
     max_blocks = len(block_rows)
     fill_count = min(len(employee_base), max_blocks)
 
     for r in block_rows:
-        for col in [2, 3, 5]:
-            if _writable(r, col):
-                ws.cell(row=r, column=col, value=None)
+        # Левая часть строки сотрудника.
+        for col in [2, 3]:
+            _set_cell_value_safe(ws, r, col, None)
+        _set_cell_value_safe(ws, r, 5, None)
         mapped_cols = list({**first_half_map, **second_half_map}.values())
         if mapped_cols:
             day_grid_start = max(1, min(mapped_cols))
@@ -1370,7 +1651,9 @@ def _fill_t13_template_sheet(
             day_grid_start, day_grid_end = 9, ws.max_column
 
         for row_idx in (r, r + 1, r + 2, r + 3):
-            for col in range(day_grid_start, day_grid_end + 1):
+            # Очищаем всю правую часть блока сотрудника, чтобы удалить "зашитые"
+            # числа шаблона (например 136/96/40/12), которые могут вводить в заблуждение.
+            for col in range(day_grid_start, ws.max_column + 1):
                 if _writable(row_idx, col):
                     cell = ws.cell(row=row_idx, column=col)
                     cell.value = None
@@ -1380,18 +1663,17 @@ def _fill_t13_template_sheet(
         rec = employee_base.iloc[idx]
         employee = str(rec["employee"])
         restaurant = str(rec["restaurant"])
+        tab_number = str(rec.get("tab_number", "") or "")
         role = str(rec["role"])
         role_group = str(rec["role_group"])
+        half_preference = str(rec.get("half_preference", "neutral") or "neutral")
         payroll_days_target = int(pd.to_numeric(rec["max_days"], errors="coerce") or 0)
         payroll_hours_target = float(pd.to_numeric(rec["max_hours"], errors="coerce") or 0.0)
 
         r = block_rows[idx]
-        if _writable(r, 2):
-            ws.cell(row=r, column=2, value=str(idx + 1))
-        if _writable(r, 3):
-            ws.cell(row=r, column=3, value=f"{employee}\n({role})")
-        if _writable(r, 5):
-            ws.cell(row=r, column=5, value="")
+        _set_cell_value_safe(ws, r, 2, str(idx + 1))
+        _set_cell_value_safe(ws, r, 3, f"{employee}\n({role})")
+        _set_cell_value_safe(ws, r, 5, tab_number if tab_number else "")
 
         factual_days = sorted({day for (emp_key, day) in details_map.keys() if emp_key == employee})
         selected_days = _select_employee_days(
@@ -1400,10 +1682,44 @@ def _fill_t13_template_sheet(
             target_count=payroll_days_target,
             prefer_weekends=_is_core_group(role_group),
             weekend_days=weekend_days_set,
+            half_preference=half_preference,
         )
 
         day_hours = _distribute_hours(payroll_hours_target, len(selected_days))
         hours_map = {day: day_hours[pos] for pos, day in enumerate(selected_days)}
+        first_half_days = [day for day in selected_days if day <= 15]
+        second_half_days = [day for day in selected_days if day >= 16]
+        first_half_days_count = len(first_half_days)
+        second_half_days_count = len(second_half_days)
+        first_half_hours = round(sum(float(hours_map.get(day, 0.0)) for day in first_half_days), 2)
+        second_half_hours = round(sum(float(hours_map.get(day, 0.0)) for day in second_half_days), 2)
+        total_days = first_half_days_count + second_half_days_count
+        total_hours = round(first_half_hours + second_half_hours, 2)
+
+        if totals_col_5 is not None:
+            if _writable(r, totals_col_5):
+                _set_cell_value_safe(ws, r, totals_col_5, first_half_days_count if first_half_days_count > 0 else "")
+            if _writable(r + 1, totals_col_5):
+                _set_cell_value_safe(ws, r + 1, totals_col_5, first_half_hours if first_half_hours > 0 else "")
+            if _writable(r + 2, totals_col_5):
+                _set_cell_value_safe(
+                    ws,
+                    r + 2,
+                    totals_col_5,
+                    second_half_days_count if second_half_days_count > 0 else "",
+                )
+            if _writable(r + 3, totals_col_5):
+                _set_cell_value_safe(ws, r + 3, totals_col_5, second_half_hours if second_half_hours > 0 else "")
+
+        if totals_col_6 is not None:
+            if _writable(r, totals_col_6):
+                _set_cell_value_safe(ws, r, totals_col_6, total_days if total_days > 0 else "")
+            if _writable(r + 1, totals_col_6):
+                _set_cell_value_safe(ws, r + 1, totals_col_6, "")
+            if _writable(r + 2, totals_col_6):
+                _set_cell_value_safe(ws, r + 2, totals_col_6, total_hours if total_hours > 0 else "")
+            if _writable(r + 3, totals_col_6):
+                _set_cell_value_safe(ws, r + 3, totals_col_6, "")
 
         for day in sorted_days:
             if day <= 15:
@@ -1419,31 +1735,64 @@ def _fill_t13_template_sheet(
 
             if day not in hours_map:
                 if code_col is not None:
-                    code_cell = ws.cell(row=code_row, column=code_col)
-                    code_cell.value = "В"
-                    code_cell.comment = None
+                    _set_cell_value_safe(ws, code_row, code_col, "В")
+                    _set_cell_comment_safe(ws, code_row, code_col, None)
                 if hours_col is not None:
-                    ws.cell(row=hours_row, column=hours_col, value=None)
+                    _set_cell_value_safe(ws, hours_row, hours_col, None)
                 continue
 
             key = (employee, day)
             worked_restaurants = sorted(set(details_map.get(key, [])))
             if code_col is not None:
-                code_cell = ws.cell(row=code_row, column=code_col)
                 if worked_restaurants:
-                    code_cell.value = "Я"
+                    _set_cell_value_safe(ws, code_row, code_col, "Я")
                     if any(rest != restaurant for rest in worked_restaurants):
                         note = "Межресторанная подмена: " + ", ".join(worked_restaurants)
-                        code_cell.comment = Comment(note, "tabel")
+                        _set_cell_comment_safe(ws, code_row, code_col, Comment(note, "tabel"))
                     else:
-                        code_cell.comment = None
+                        _set_cell_comment_safe(ws, code_row, code_col, None)
                 else:
-                    code_cell.value = "ПЛ"
-                    code_cell.comment = None
+                    _set_cell_value_safe(ws, code_row, code_col, "ПЛ")
+                    _set_cell_comment_safe(ws, code_row, code_col, None)
             if hours_col is not None:
-                ws.cell(row=hours_row, column=hours_col, value=round(float(hours_map[day]), 2))
+                _set_cell_value_safe(ws, hours_row, hours_col, round(float(hours_map[day]), 2))
 
     ws.cell(row=2, column=1, value=f"Сформировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+
+    if continuous_table:
+        # На общем листе оставляем только одну непрерывную табличную часть
+        # и очищаем "хвост" с повторными шапками/демо-данными от следующих страниц шаблона.
+        used_end_row = start_row + max(fill_count, 0) * 4
+        for row_idx in range(used_end_row + 1, ws.max_row + 1):
+            for col_idx in range(1, ws.max_column + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                if cell.__class__.__name__ == "MergedCell":
+                    continue
+                cell.value = None
+                cell.comment = None
+
+
+def _clear_structural_subdivision_header(ws) -> None:
+    max_scan_row = min(60, ws.max_row)
+    max_scan_col = min(40, ws.max_column)
+    for row in range(1, max_scan_row + 1):
+        for col in range(1, max_scan_col + 1):
+            value = ws.cell(row=row, column=col).value
+            text = str(value or "").strip().lower()
+            if "структурное подразделение" in text:
+                ws.cell(row=row, column=col, value="")
+
+
+def _clear_comments_in_merged_non_anchor_cells(ws) -> None:
+    for merged in ws.merged_cells.ranges:
+        min_row, min_col, max_row, max_col = merged.min_row, merged.min_col, merged.max_row, merged.max_col
+        for row in range(min_row, max_row + 1):
+            for col in range(min_col, max_col + 1):
+                if row == min_row and col == min_col:
+                    continue
+                cell = ws.cell(row=row, column=col)
+                if cell.comment is not None:
+                    cell.comment = None
 
 
 def export_t13_to_excel(
@@ -1452,6 +1801,8 @@ def export_t13_to_excel(
     output_path: Path,
     template_bytes: Optional[bytes] = None,
     weekend_days: Optional[set[int]] = None,
+    period_year: Optional[int] = None,
+    period_month: Optional[int] = None,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1460,6 +1811,10 @@ def export_t13_to_excel(
 
         template_wb = load_workbook(BytesIO(template_bytes))
         ws = template_wb[template_wb.sheetnames[0]]
+        # Общий лист создаем из чистого шаблона (до заполнения основного),
+        # чтобы не наследовать уже проставленные значения/комментарии.
+        ws_all = template_wb.copy_worksheet(ws)
+        ws_all.title = "Т-13 общий"
 
         all_restaurants = sorted(result.employee_summary["restaurant"].astype(str).unique().tolist())
         restaurant_codes = {name: f"R{idx:02d}" for idx, name in enumerate(all_restaurants, start=1)}
@@ -1469,7 +1824,25 @@ def export_t13_to_excel(
             days=days,
             restaurant_codes=restaurant_codes,
             weekend_days=weekend_days,
+            sort_mode="by_restaurant",
+            continuous_table=False,
         )
+
+        # Дополнительный лист: общий табель по юрлицу, сплошным списком по алфавиту.
+        _fill_t13_template_sheet(
+            ws=ws_all,
+            result=result,
+            days=days,
+            restaurant_codes=restaurant_codes,
+            weekend_days=weekend_days,
+            sort_mode="alphabetical",
+            continuous_table=True,
+        )
+        _clear_structural_subdivision_header(ws_all)
+        _set_t13_report_period(ws, period_year, period_month)
+        _set_t13_report_period(ws_all, period_year, period_month)
+        _clear_comments_in_merged_non_anchor_cells(ws)
+        _clear_comments_in_merged_non_anchor_cells(ws_all)
         template_wb.save(output_path)
         return
 
