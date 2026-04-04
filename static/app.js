@@ -310,7 +310,7 @@ previewFilter.addEventListener("change", renderFilteredPreview);
 
 async function loadVersion() {
   try {
-    const response = await fetch("/version");
+    const response = await fetch(`/version?t=${Date.now()}`);
     if (!response.ok) {
       return;
     }

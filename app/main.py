@@ -99,9 +99,18 @@ def _resolve_t13_template_bytes() -> tuple[Optional[bytes], Optional[str], Optio
     return None, None, None
 
 
+def _read_app_version() -> str:
+    try:
+        if VERSION_FILE.exists():
+            return VERSION_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return APP_VERSION
+
+
 @app.get("/version")
 def version() -> dict:
-    return {"version": APP_VERSION}
+    return {"version": _read_app_version()}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -198,7 +207,12 @@ def generate(payload: Optional[GenerateRequest] = None) -> dict:
 
     try:
         template_bytes, template_source, template_warning = _resolve_t13_template_bytes()
-        export_schedule_to_excel(result, output_path)
+        export_schedule_to_excel(
+            result=result,
+            output_path=output_path,
+            days=runtime.prepared.days,
+            weekend_days=set(runtime.prepared.weekend_days),
+        )
         export_t13_to_excel(
             result=result,
             days=runtime.prepared.days,
