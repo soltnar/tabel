@@ -230,6 +230,8 @@ def generate(payload: Optional[GenerateRequest] = None) -> dict:
             result=result,
             days=runtime.prepared.days,
             output_path=t13_pdf_output_path,
+            period_year=runtime.prepared.period_year,
+            period_month=runtime.prepared.period_month,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_internal_error_detail("Ошибка сохранения результата", exc)) from exc

@@ -2212,6 +2212,8 @@ def export_t13_to_pdf(
     result: ScheduleResult,
     days: list[int],
     output_path: Path,
+    period_year: Optional[int] = None,
+    period_month: Optional[int] = None,
 ) -> None:
     """
     Экспорт заполненного Т-13 в PDF (табличное представление).
@@ -2221,10 +2223,31 @@ def export_t13_to_pdf(
     from reportlab.lib.pagesizes import A3, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     t13_df, _restaurant_codes = _build_t13_dataframe(result=result, days=days)
+
+    # Подбираем шрифт с кириллицей (иначе в PDF будут "квадраты").
+    font_name = "Helvetica"
+    font_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+    ]
+    for font_path in font_candidates:
+        p = Path(font_path)
+        if p.exists():
+            try:
+                pdfmetrics.registerFont(TTFont("T13Sans", str(p)))
+                font_name = "T13Sans"
+                break
+            except Exception:
+                continue
 
     sorted_days = sorted({int(day) for day in days})
     day_cols = [str(day) for day in sorted_days]
@@ -2241,17 +2264,17 @@ def export_t13_to_pdf(
     title_style = ParagraphStyle(
         "TitleSmall",
         parent=styles["Heading2"],
-        fontName="Helvetica-Bold",
-        fontSize=10,
-        leading=12,
+        fontName=font_name,
+        fontSize=12,
+        leading=14,
         alignment=1,
     )
     meta_style = ParagraphStyle(
         "Meta",
         parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8,
-        leading=10,
+        fontName=font_name,
+        fontSize=9,
+        leading=11,
     )
 
     doc = SimpleDocTemplate(
@@ -2264,9 +2287,16 @@ def export_t13_to_pdf(
         title="Табель Т-13",
     )
 
+    period_text = ""
+    if period_year and period_month:
+        last_day = calendar.monthrange(int(period_year), int(period_month))[1]
+        period_text = f"Период: 01.{int(period_month):02d}.{int(period_year)} - {last_day:02d}.{int(period_month):02d}.{int(period_year)}"
+
     story = [
-        Paragraph("Табель учета рабочего времени (Т-13) — заполненные данные", title_style),
+        Paragraph("Табель учета рабочего времени (Унифицированная форма Т-13)", title_style),
         Spacer(1, 2 * mm),
+        Paragraph(period_text if period_text else "Период: из расчетного листа", meta_style),
+        Spacer(1, 1 * mm),
         Paragraph(f"Сформировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}", meta_style),
         Spacer(1, 2 * mm),
     ]
@@ -2276,18 +2306,19 @@ def export_t13_to_pdf(
     for _, row in safe_df.iterrows():
         body_rows.append([str(row.get(col, "") or "") for col in columns])
 
-    # Ширины: фикс для ключевых колонок + компактные дни.
-    col_widths = [10 * mm, 38 * mm, 42 * mm, 24 * mm] + [8 * mm for _ in day_cols] + [12 * mm, 14 * mm]
+    # Ширины: под «бланковый» вид, но с читаемым текстом.
+    col_widths = [9 * mm, 34 * mm, 46 * mm, 24 * mm] + [7.2 * mm for _ in day_cols] + [12 * mm, 14 * mm]
     table = Table(body_rows, colWidths=col_widths, repeatRows=1)
     table_style = TableStyle(
         [
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.black),
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dce6f2")),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, 0), 7),
+            ("FONTNAME", (0, 0), (-1, 0), font_name),
+            ("FONTSIZE", (0, 0), (-1, 0), 8),
             ("ALIGN", (0, 0), (-1, 0), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("FONTSIZE", (0, 1), (-1, -1), 6),
+            ("FONTNAME", (0, 1), (-1, -1), font_name),
+            ("FONTSIZE", (0, 1), (-1, -1), 7),
             ("ALIGN", (4, 1), (-1, -1), "CENTER"),
             ("ALIGN", (0, 1), (3, -1), "LEFT"),
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fbff")]),
@@ -2300,10 +2331,10 @@ def export_t13_to_pdf(
         num_val = row[0].strip().upper()
         if role_val == "часы":
             table_style.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f2f2f2"))
-            table_style.add("FONTSIZE", (0, i), (-1, i), 5.8)
+            table_style.add("FONTSIZE", (0, i), (-1, i), 6.6)
         if num_val == "ИТОГО":
             table_style.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#e8f0fe"))
-            table_style.add("FONTNAME", (0, i), (-1, i), "Helvetica-Bold")
+            table_style.add("FONTNAME", (0, i), (-1, i), font_name)
 
     table.setStyle(table_style)
     story.append(table)

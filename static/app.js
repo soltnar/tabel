@@ -5,7 +5,6 @@ const generateBtn = document.getElementById("generateBtn");
 const downloadBtn = document.getElementById("downloadBtn");
 const downloadT13Btn = document.getElementById("downloadT13Btn");
 const downloadT13PdfBtn = document.getElementById("downloadT13PdfBtn");
-const downloadT13PdfFormBtn = document.getElementById("downloadT13PdfFormBtn");
 const downloadLogBtn = document.getElementById("downloadLogBtn");
 const previewFilter = document.getElementById("previewFilter");
 const previewMeta = document.getElementById("previewMeta");
@@ -272,10 +271,6 @@ downloadT13Btn.addEventListener("click", () => {
 
 downloadT13PdfBtn.addEventListener("click", () => {
   window.location.href = "/download_t13_pdf";
-});
-
-downloadT13PdfFormBtn.addEventListener("click", () => {
-  window.location.href = "/download_t13_pdf_form";
 });
 
 downloadLogBtn.addEventListener("click", () => {
