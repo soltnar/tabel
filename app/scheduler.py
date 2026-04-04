@@ -1810,20 +1810,12 @@ def _fill_t13_template_sheet(
         ].reset_index(drop=True)
     needed_blocks = len(pre_employee_base)
 
-    if continuous_table:
-        block_rows = _find_t13_block_rows(
-            ws=ws,
-            start_row=start_row,
-            first_half_map=first_half_map,
-            second_half_map=second_half_map,
-        )
-    else:
-        block_rows = _find_t13_block_rows(
-            ws=ws,
-            start_row=start_row,
-            first_half_map=first_half_map,
-            second_half_map=second_half_map,
-        )
+    block_rows = _find_t13_block_rows(
+        ws=ws,
+        start_row=start_row,
+        first_half_map=first_half_map,
+        second_half_map=second_half_map,
+    )
 
     assignments = result.assignments.copy()
     if assignments.empty:
@@ -1835,10 +1827,19 @@ def _fill_t13_template_sheet(
     assignments["restaurant"] = assignments.get("restaurant", "").astype(str)
 
     details_map: dict[tuple[str, int], list[str]] = defaultdict(list)
+    day_hours_map: dict[tuple[str, int], float] = {}
     for _, row in assignments.iterrows():
         key = (str(row["employee"]), int(row["day"]))
         rest_name = str(row["restaurant"])
         details_map[key].append(rest_name)
+    if not assignments.empty and "hours" in assignments.columns:
+        day_hours_map = (
+            assignments.assign(hours=pd.to_numeric(assignments["hours"], errors="coerce").fillna(0.0))
+            .groupby(["employee", "day"], as_index=False)["hours"]
+            .sum()
+            .set_index(["employee", "day"])["hours"]
+            .to_dict()
+        )
 
     employee_base = pre_employee_base.copy()
     if sort_mode == "alphabetical":
@@ -1850,9 +1851,19 @@ def _fill_t13_template_sheet(
         # Шаблон без предзаполненных сотрудников: стартуем с первой найденной строки блока.
         block_rows = [start_row]
 
+    # Для общего листа всегда строим непрерывную таблицу сотрудников без
+    # промежуточных шапок/подвалов страниц шаблона.
+    if continuous_table and block_rows:
+        expanded_rows = _ensure_continuous_table_for_general_sheet(
+            ws=ws,
+            start_row=block_rows[0],
+            required_blocks=len(employee_base),
+        )
+        if expanded_rows:
+            block_rows = expanded_rows
     # Если шаблон содержит мало строк-блоков (например только один плейсхолдер),
     # автоматически наращиваем непрерывную табличную часть.
-    if len(block_rows) < len(employee_base) and block_rows:
+    elif len(block_rows) < len(employee_base) and block_rows:
         expanded_rows = _ensure_continuous_table_for_general_sheet(
             ws=ws,
             start_row=block_rows[0],
@@ -1898,18 +1909,25 @@ def _fill_t13_template_sheet(
         _set_cell_value_safe(ws, r, 2, str(idx + 1))
         _set_cell_value_safe(ws, r, 3, f"{employee}\n({role})")
         _set_cell_value_safe(ws, r, 5, tab_number if tab_number else "")
-        factual_days = sorted({day for (emp_key, day) in details_map.keys() if emp_key == employee})
-        selected_days = _select_employee_days(
-            factual_days=factual_days,
-            all_days=sorted_days,
-            target_count=payroll_days_target,
-            prefer_weekends=_is_core_group(role_group),
-            weekend_days=weekend_days_set,
-            half_preference=half_preference,
-        )
-
-        day_hours = _distribute_hours(payroll_hours_target, len(selected_days))
-        hours_map = {day: day_hours[pos] for pos, day in enumerate(selected_days)}
+        assigned_days = sorted({day for (emp_key, day) in day_hours_map.keys() if emp_key == employee})
+        if assigned_days:
+            selected_days = assigned_days
+            hours_map = {
+                day: round(float(day_hours_map.get((employee, day), 0.0)), 2)
+                for day in selected_days
+            }
+        else:
+            factual_days = sorted({day for (emp_key, day) in details_map.keys() if emp_key == employee})
+            selected_days = _select_employee_days(
+                factual_days=factual_days,
+                all_days=sorted_days,
+                target_count=payroll_days_target,
+                prefer_weekends=_is_core_group(role_group),
+                weekend_days=weekend_days_set,
+                half_preference=half_preference,
+            )
+            day_hours = _distribute_hours(payroll_hours_target, len(selected_days))
+            hours_map = {day: day_hours[pos] for pos, day in enumerate(selected_days)}
         first_half_days = [day for day in selected_days if day <= 15]
         second_half_days = [day for day in selected_days if day >= 16]
         first_half_days_count = len(first_half_days)
@@ -1983,7 +2001,10 @@ def _fill_t13_template_sheet(
     ws.cell(row=2, column=1, value=f"Сформировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
 
     if continuous_table:
-        pass
+        # На непрерывном листе явно убираем скрытие строк, оставшееся от шаблона.
+        for row_idx in range(1, ws.max_row + 1):
+            if ws.row_dimensions[row_idx].hidden:
+                ws.row_dimensions[row_idx].hidden = False
 
 
 def _clear_structural_subdivision_header(ws) -> None:
@@ -2122,11 +2143,8 @@ def export_t13_to_excel(
             restaurant_codes=restaurant_codes,
             weekend_days=weekend_days,
             sort_mode="alphabetical",
-            continuous_table=False,
+            continuous_table=True,
         )
-        # На общем листе удаляем промежуточные служебные разрывы по контексту,
-        # чтобы таблица шла единым списком.
-        _remove_common_sheet_gap_rows_by_context(ws_all)
         _clear_structural_subdivision_header(ws_all)
         _clear_structural_subdivision_values(ws_all, all_restaurants)
         _set_t13_report_period(ws, period_year, period_month)
