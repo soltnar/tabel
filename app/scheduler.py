@@ -2426,11 +2426,49 @@ def export_t13_to_pdf(
     output_path: Path,
     period_year: Optional[int] = None,
     period_month: Optional[int] = None,
+    source_xlsx_path: Optional[Path] = None,
 ) -> None:
     """
-    Экспорт заполненного Т-13 в PDF (табличное представление).
-    Структура данных синхронизирована с Excel-экспортом через _build_t13_dataframe.
+    Экспорт заполненного Т-13 в PDF.
+    1) При наличии LibreOffice (soffice/libreoffice) конвертирует уже
+       сформированный Excel Т-13 в PDF — это дает максимально идентичный вид.
+    2) Если конвертация недоступна, использует reportlab fallback
+       (табличное представление).
     """
+    import shutil
+    import subprocess
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Приоритет: PDF как прямой экспорт из T-13 Excel (максимально "тот же формат").
+    if source_xlsx_path and source_xlsx_path.exists():
+        office_bin = shutil.which("soffice") or shutil.which("libreoffice")
+        if office_bin:
+            try:
+                subprocess.run(
+                    [
+                        office_bin,
+                        "--headless",
+                        "--convert-to",
+                        "pdf:calc_pdf_Export",
+                        "--outdir",
+                        str(output_path.parent),
+                        str(source_xlsx_path),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                converted_pdf = output_path.parent / f"{source_xlsx_path.stem}.pdf"
+                if converted_pdf.exists():
+                    if converted_pdf.resolve() != output_path.resolve():
+                        converted_pdf.replace(output_path)
+                    return
+            except Exception:
+                # Если внешняя конвертация не удалась — уходим в fallback.
+                pass
+
+    # Fallback: reportlab-представление.
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A3, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -2439,7 +2477,6 @@ def export_t13_to_pdf(
     from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     t13_df, _restaurant_codes = _build_t13_dataframe(result=result, days=days)
 
     # Подбираем шрифт с кириллицей (иначе в PDF будут "квадраты").
