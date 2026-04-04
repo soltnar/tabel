@@ -1467,11 +1467,20 @@ def _find_t13_totals_columns(
 
 
 def _find_t13_first_employee_row(ws) -> int:
+    # 1) Классический случай: уже есть строка сотрудника (цифровой № + ФИО + таб.номер)
     for row in range(1, min(120, ws.max_row) + 1):
         number = str(ws.cell(row=row, column=2).value or "").strip()
         fio = str(ws.cell(row=row, column=3).value or "").strip()
         tab_num = str(ws.cell(row=row, column=5).value or "").strip()
         if number.isdigit() and "(" in fio and tab_num:
+            return row
+
+    # 2) Шаблонный случай: в строке стоят плейсхолдеры формата {%<...>%}
+    for row in range(1, min(180, ws.max_row) + 1):
+        c2 = str(ws.cell(row=row, column=2).value or "")
+        c3 = str(ws.cell(row=row, column=3).value or "")
+        c5 = str(ws.cell(row=row, column=5).value or "")
+        if "{%" in c2 and "{%" in c3 and "{%" in c5:
             return row
     return 22
 
@@ -1726,12 +1735,12 @@ def _find_t13_block_rows(
         return ws.cell(row=row, column=col).__class__.__name__ != "MergedCell"
 
     def _block_has_valid_day_grid(block_start: int) -> bool:
-        for _day, col in first_half_map.items():
-            if not (_writable(block_start, col) and _writable(block_start + 1, col)):
-                return False
-        for _day, col in second_half_map.items():
-            if not (_writable(block_start + 2, col) and _writable(block_start + 3, col)):
-                return False
+        # Для шаблонов с merge-ячейками не требуем writable в каждой ячейке дня:
+        # запись выполняется через _set_cell_value_safe в anchor merged-range.
+        if block_start + 3 > ws.max_row:
+            return False
+        if not first_half_map or not second_half_map:
+            return False
         return True
 
     # 1) Основной путь: берем "якорные" строки сотрудников по шаблонным номерам/ФИО.
@@ -1749,13 +1758,19 @@ def _find_t13_block_rows(
     if anchor_rows:
         return sorted(anchor_rows)
 
-    # 2) Fallback: равномерная сетка +4 от первой строки сотрудника.
+    # 2) Fallback: сканируем по всем строкам, чтобы ловить шаблоны,
+    # где первый блок начинается не на start_row, а на +1/+2.
     rows: list[int] = []
-    row = start_row
+    row = max(1, start_row - 4)
     while row <= ws.max_row - 3:
-        if _writable(row, 2) and _writable(row, 3) and _writable(row, 5) and _block_has_valid_day_grid(row):
-            rows.append(row)
-        row += 4
+        c2 = ws.cell(row=row, column=2).value
+        c3 = ws.cell(row=row, column=3).value
+        c5 = ws.cell(row=row, column=5).value
+        has_left_part = bool(str(c2 or "").strip()) and bool(str(c3 or "").strip()) and bool(str(c5 or "").strip())
+        if has_left_part and _writable(row, 2) and _writable(row, 3) and _writable(row, 5) and _block_has_valid_day_grid(row):
+            if not rows or row - rows[-1] >= 4:
+                rows.append(row)
+        row += 1
     return rows
 
 
@@ -1830,6 +1845,21 @@ def _fill_t13_template_sheet(
         employee_base = employee_base.sort_values(["employee", "restaurant", "role"]).reset_index(drop=True)
     else:
         employee_base = employee_base.sort_values(["restaurant", "role", "employee"]).reset_index(drop=True)
+
+    if not block_rows:
+        # Шаблон без предзаполненных сотрудников: стартуем с первой найденной строки блока.
+        block_rows = [start_row]
+
+    # Если шаблон содержит мало строк-блоков (например только один плейсхолдер),
+    # автоматически наращиваем непрерывную табличную часть.
+    if len(block_rows) < len(employee_base) and block_rows:
+        expanded_rows = _ensure_continuous_table_for_general_sheet(
+            ws=ws,
+            start_row=block_rows[0],
+            required_blocks=len(employee_base),
+        )
+        if expanded_rows:
+            block_rows = expanded_rows
 
     max_blocks = len(block_rows)
     fill_count = min(len(employee_base), max_blocks)
