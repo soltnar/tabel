@@ -33,6 +33,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
 OUTPUT_DIR = BASE_DIR / "outputs"
 VERSION_FILE = BASE_DIR / "VERSION"
+T13_PDF_FORM_FILE = BASE_DIR / "templates" / "t13_form.pdf"
 APP_VERSION = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "0.1.0"
 
 setup_logging(APP_VERSION)
@@ -325,6 +326,18 @@ def download_t13() -> FileResponse:
         path=runtime.t13_output_path,
         filename=runtime.t13_output_path.name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.get("/download_t13_pdf_form")
+def download_t13_pdf_form() -> FileResponse:
+    if not T13_PDF_FORM_FILE.exists():
+        raise HTTPException(status_code=404, detail="PDF-форма Т-13 не найдена в templates.")
+
+    return FileResponse(
+        path=T13_PDF_FORM_FILE,
+        filename=T13_PDF_FORM_FILE.name,
+        media_type="application/pdf",
     )
 
 
