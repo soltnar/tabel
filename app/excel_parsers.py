@@ -302,6 +302,7 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
         current_tab_number = ""
         current_restaurant = "не указан"
         current_role = "не указана"
+        current_organization = ""
         block_days: list[float] = []
         block_hours: list[float] = []
         # Приоритетные значения: фактически оплаченные/отработанные за месяц.
@@ -354,6 +355,7 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
             nonlocal current_tab_number
             nonlocal current_restaurant
             nonlocal current_role
+            nonlocal current_organization
             nonlocal first_half_pay
             nonlocal second_half_pay
             if not current_employee:
@@ -397,6 +399,7 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
                         "restaurant": _normalize_restaurant(current_restaurant) or "не указан",
                         "role": _normalize_text(current_role) or "не указана",
                         "tab_number": str(current_tab_number or ""),
+                        "organization": _normalize_text(current_organization) or "",
                         "first_half_pay": float(first_half_pay),
                         "second_half_pay": float(second_half_pay),
                         "half_preference": half_preference,
@@ -422,6 +425,7 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
                 current_tab_number = _extract_tab_number(col0_text)
                 current_restaurant = "не указан"
                 current_role = "не указана"
+                current_organization = ""
                 continue
 
             if not current_employee:
@@ -435,6 +439,10 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
             detected_role = _find_value_near_label(row_values, ("должност",))
             if detected_role:
                 current_role = detected_role
+
+            detected_org = _find_value_near_label(row_values, ("организац",))
+            if detected_org:
+                current_organization = detected_org
 
             # Определяем реальные колонки "Дни/Часы" по заголовку строки.
             if detected_days_col is None or detected_hours_col is None:
@@ -939,6 +947,8 @@ def prepare_input(
     if "tab_number" not in merged.columns:
         merged["tab_number"] = ""
     merged["tab_number"] = merged["tab_number"].fillna("").astype(str).str.strip()
+    if "organization" not in merged.columns:
+        merged["organization"] = ""
     merged["role_original"] = merged["role"]
     merged["role_group"] = merged["role_original"].map(_map_role_group)
 
@@ -958,6 +968,7 @@ def prepare_input(
             "role_group",
             "max_hours",
             "max_days",
+            "organization",
             "first_half_pay",
             "second_half_pay",
             "half_preference",
@@ -991,6 +1002,11 @@ def prepare_input(
         "days_in_template": int(len(days)),
         "weekend_days_in_template": int(len(weekend_days)),
     }
+    if "organization" in merged.columns:
+        org_series = merged["organization"].fillna("").astype(str).str.strip()
+        org_series = org_series[org_series != ""]
+        if not org_series.empty:
+            summary["organization_name"] = str(org_series.mode().iloc[0]).upper()
 
     return PreparedInput(
         employees=merged,

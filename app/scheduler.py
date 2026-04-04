@@ -45,6 +45,8 @@ NON_MANDATORY_ROLE_TOKENS = (
     "маркетолог",
     "аниматор",
     "гардеробщик",
+    "юрист",
+    "уборщ",
 )
 WEEKEND_FOCUSED_OPTIONAL_ROLE_TOKENS = (
     "аниматор",
@@ -55,7 +57,18 @@ WEEKDAY_FOCUSED_OPTIONAL_ROLE_TOKENS = (
     "подсобный рабочий",
     "маркетолог",
     "директор",
+    "юрист",
+    "уборщ",
 )
+
+
+def _restaurant_supports_group(restaurant: str, role_group: str) -> bool:
+    rest = str(restaurant or "").strip().lower()
+    group = str(role_group or "").strip()
+    # На Коминтерна, 166 не планируем зал/бар.
+    if "коминтерна" in rest and "166" in rest and group in {HALL_ROLE, BAR_ROLE}:
+        return False
+    return True
 
 
 class ScheduleGenerationError(RuntimeError):
@@ -420,7 +433,8 @@ def generate_schedule(
     target_groups_set: set[tuple[str, str]] = set(by_group.keys())
     for restaurant in restaurants:
         for group in CORE_MANDATORY_GROUPS:
-            target_groups_set.add((restaurant, group))
+            if _restaurant_supports_group(restaurant, group):
+                target_groups_set.add((restaurant, group))
     group_priority = {
         CASH_ROLE: 0,
         HALL_ROLE: 1,
@@ -449,6 +463,8 @@ def generate_schedule(
 
     for day_rank, day in enumerate(sorted_days, start=1):
         for restaurant, role_group in target_groups:
+            if not _restaurant_supports_group(restaurant, role_group):
+                continue
             primary_pool = by_group[(restaurant, role_group)]
             fallback_pool: list[_EmployeeState] = []
 
@@ -1778,6 +1794,41 @@ def _set_t13_report_period(ws, year: Optional[int], month: Optional[int]) -> Non
         _set_cell_value_safe(ws, target_row, po_col, to_text)
 
 
+def _set_t13_header_identity(
+    ws,
+    organization_name: Optional[str],
+    subdivision_name: Optional[str],
+) -> None:
+    max_scan_row = min(ws.max_row, 160)
+    max_scan_col = min(ws.max_column, 80)
+    org_label_row: Optional[int] = None
+    sub_label_row: Optional[int] = None
+    date_label_row: Optional[int] = None
+    date_label_col: Optional[int] = None
+
+    for row in range(1, max_scan_row + 1):
+        for col in range(1, max_scan_col + 1):
+            text = str(ws.cell(row=row, column=col).value or "").strip().lower()
+            if not text:
+                continue
+            if org_label_row is None and "наименование организац" in text:
+                org_label_row = row
+            if sub_label_row is None and "структурное подраздел" in text:
+                sub_label_row = row
+            if date_label_row is None and "дата составления" in text:
+                date_label_row, date_label_col = row, col
+
+    if organization_name and org_label_row and org_label_row > 1:
+        _set_cell_value_safe(ws, org_label_row - 1, 1, str(organization_name))
+
+    if sub_label_row and sub_label_row > 1:
+        value = str(subdivision_name or "").strip()
+        _set_cell_value_safe(ws, sub_label_row - 1, 1, value)
+
+    if date_label_row is not None and date_label_col is not None:
+        _set_cell_value_safe(ws, date_label_row + 1, date_label_col, datetime.now().strftime("%d.%m.%Y"))
+
+
 def _find_t13_block_rows(
     ws,
     start_row: int,
@@ -1973,6 +2024,12 @@ def _fill_t13_template_sheet(
         r = block_rows[idx]
         _set_cell_value_safe(ws, r, num_col, str(idx + 1))
         _set_cell_value_safe(ws, r, fio_col, f"{employee}\n({role})")
+        _set_cell_alignment_safe(
+            ws,
+            r,
+            fio_col,
+            Alignment(horizontal="center", vertical="center", wrap_text=True),
+        )
         _set_cell_value_safe(ws, r, tab_col, tab_number if tab_number else "")
         assigned_days = sorted({day for (emp_key, day) in day_hours_map.keys() if emp_key == employee})
         if assigned_days:
@@ -2157,6 +2214,7 @@ def export_t13_to_excel(
     weekend_days: Optional[set[int]] = None,
     period_year: Optional[int] = None,
     period_month: Optional[int] = None,
+    organization_name: Optional[str] = None,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2181,6 +2239,7 @@ def export_t13_to_excel(
             sort_mode="by_restaurant",
             continuous_table=False,
         )
+        _set_t13_header_identity(ws, organization_name=organization_name, subdivision_name=None)
 
         # Листы по каждому ресторану (внутри — только сотрудники подразделения).
         for restaurant_name in all_restaurants:
@@ -2197,6 +2256,11 @@ def export_t13_to_excel(
                 continuous_table=False,
                 filter_restaurant=restaurant_name,
             )
+            _set_t13_header_identity(
+                ws_rest,
+                organization_name=organization_name,
+                subdivision_name=restaurant_name,
+            )
             _set_t13_report_period(ws_rest, period_year, period_month)
             _clear_comments_in_merged_non_anchor_cells(ws_rest)
 
@@ -2210,6 +2274,7 @@ def export_t13_to_excel(
             sort_mode="alphabetical",
             continuous_table=True,
         )
+        _set_t13_header_identity(ws_all, organization_name=organization_name, subdivision_name=None)
         _clear_structural_subdivision_header(ws_all)
         _clear_structural_subdivision_values(ws_all, all_restaurants)
         _set_t13_report_period(ws, period_year, period_month)

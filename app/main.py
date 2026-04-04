@@ -225,6 +225,7 @@ def generate(payload: Optional[GenerateRequest] = None) -> dict:
             weekend_days=set(runtime.prepared.weekend_days),
             period_year=runtime.prepared.period_year,
             period_month=runtime.prepared.period_month,
+            organization_name=str(runtime.prepared.summary.get("organization_name", "") or "ООО ДЕМАНЧИ"),
         )
         export_t13_to_pdf(
             result=result,
