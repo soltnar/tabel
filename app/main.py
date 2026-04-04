@@ -25,6 +25,7 @@ from app.scheduler import (
     ScheduleResult,
     build_preview_rows_t13_aligned,
     export_schedule_to_excel,
+    export_t13_to_pdf,
     export_t13_to_excel,
     generate_schedule,
 )
@@ -46,6 +47,7 @@ class RuntimeState:
     generated: Optional[ScheduleResult] = None
     output_path: Optional[Path] = None
     t13_output_path: Optional[Path] = None
+    t13_pdf_output_path: Optional[Path] = None
 
 
 class GenerateRequest(BaseModel):
@@ -205,6 +207,7 @@ def generate(payload: Optional[GenerateRequest] = None) -> dict:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = OUTPUT_DIR / f"schedule_{timestamp}.xlsx"
     t13_output_path = OUTPUT_DIR / f"timesheet_t13_{timestamp}.xlsx"
+    t13_pdf_output_path = OUTPUT_DIR / f"timesheet_t13_{timestamp}.pdf"
 
     try:
         template_bytes, template_source, template_warning = _resolve_t13_template_bytes()
@@ -223,6 +226,11 @@ def generate(payload: Optional[GenerateRequest] = None) -> dict:
             period_year=runtime.prepared.period_year,
             period_month=runtime.prepared.period_month,
         )
+        export_t13_to_pdf(
+            result=result,
+            days=runtime.prepared.days,
+            output_path=t13_pdf_output_path,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_internal_error_detail("Ошибка сохранения результата", exc)) from exc
 
@@ -231,6 +239,7 @@ def generate(payload: Optional[GenerateRequest] = None) -> dict:
         generated=result,
         output_path=output_path,
         t13_output_path=t13_output_path,
+        t13_pdf_output_path=t13_pdf_output_path,
     )
 
     violations = result.employee_summary[(~result.employee_summary["hours_ok"]) | (~result.employee_summary["days_ok"])]
@@ -263,6 +272,7 @@ def generate(payload: Optional[GenerateRequest] = None) -> dict:
         "cross_restaurant_count": cross_restaurant_count,
         "download_filename": output_path.name,
         "t13_download_filename": t13_output_path.name,
+        "t13_pdf_download_filename": t13_pdf_output_path.name,
         "preview": preview_df.to_dict(orient="records"),
         "preview_total": int(len(preview_all_df)),
         "preview_page_size": PREVIEW_PAGE_SIZE,
@@ -326,6 +336,20 @@ def download_t13() -> FileResponse:
         path=runtime.t13_output_path,
         filename=runtime.t13_output_path.name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.get("/download_t13_pdf")
+def download_t13_pdf() -> FileResponse:
+    runtime: RuntimeState = app.state.runtime
+
+    if runtime.t13_pdf_output_path is None or not runtime.t13_pdf_output_path.exists():
+        raise HTTPException(status_code=404, detail="PDF табель Т-13 не найден. Сначала выполните /generate.")
+
+    return FileResponse(
+        path=runtime.t13_pdf_output_path,
+        filename=runtime.t13_pdf_output_path.name,
+        media_type="application/pdf",
     )
 
 

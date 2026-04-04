@@ -2206,3 +2206,105 @@ def export_t13_to_excel(
                     next_role = str(ws.cell(row=row_idx + 1, column=4).value or "").strip().lower()
                     if next_role == "часы":
                         ws.cell(row=row_idx + 1, column=col_idx).fill = cross_fill
+
+
+def export_t13_to_pdf(
+    result: ScheduleResult,
+    days: list[int],
+    output_path: Path,
+) -> None:
+    """
+    Экспорт заполненного Т-13 в PDF (табличное представление).
+    Структура данных синхронизирована с Excel-экспортом через _build_t13_dataframe.
+    """
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A3, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    t13_df, _restaurant_codes = _build_t13_dataframe(result=result, days=days)
+
+    sorted_days = sorted({int(day) for day in days})
+    day_cols = [str(day) for day in sorted_days]
+    columns = ["№ п/п", "Подразделение", "Сотрудник", "Должность", *day_cols, "Итого дней", "Итого часов"]
+
+    # Готовим данные таблицы (без служебной колонки "Примечание").
+    safe_df = t13_df.copy()
+    for col in columns:
+        if col not in safe_df.columns:
+            safe_df[col] = ""
+    safe_df = safe_df[columns].fillna("")
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TitleSmall",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=10,
+        leading=12,
+        alignment=1,
+    )
+    meta_style = ParagraphStyle(
+        "Meta",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=8,
+        leading=10,
+    )
+
+    doc = SimpleDocTemplate(
+        str(output_path),
+        pagesize=landscape(A3),
+        leftMargin=6 * mm,
+        rightMargin=6 * mm,
+        topMargin=6 * mm,
+        bottomMargin=6 * mm,
+        title="Табель Т-13",
+    )
+
+    story = [
+        Paragraph("Табель учета рабочего времени (Т-13) — заполненные данные", title_style),
+        Spacer(1, 2 * mm),
+        Paragraph(f"Сформировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}", meta_style),
+        Spacer(1, 2 * mm),
+    ]
+
+    header = columns
+    body_rows = [header]
+    for _, row in safe_df.iterrows():
+        body_rows.append([str(row.get(col, "") or "") for col in columns])
+
+    # Ширины: фикс для ключевых колонок + компактные дни.
+    col_widths = [10 * mm, 38 * mm, 42 * mm, 24 * mm] + [8 * mm for _ in day_cols] + [12 * mm, 14 * mm]
+    table = Table(body_rows, colWidths=col_widths, repeatRows=1)
+    table_style = TableStyle(
+        [
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dce6f2")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 7),
+            ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTSIZE", (0, 1), (-1, -1), 6),
+            ("ALIGN", (4, 1), (-1, -1), "CENTER"),
+            ("ALIGN", (0, 1), (3, -1), "LEFT"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fbff")]),
+        ]
+    )
+
+    # Подсветим строки-итоги и строки "часы".
+    for i, row in enumerate(body_rows[1:], start=1):
+        role_val = row[3].strip().lower()
+        num_val = row[0].strip().upper()
+        if role_val == "часы":
+            table_style.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f2f2f2"))
+            table_style.add("FONTSIZE", (0, i), (-1, i), 5.8)
+        if num_val == "ИТОГО":
+            table_style.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#e8f0fe"))
+            table_style.add("FONTNAME", (0, i), (-1, i), "Helvetica-Bold")
+
+    table.setStyle(table_style)
+    story.append(table)
+    doc.build(story)

@@ -4,6 +4,7 @@ const uploadBtn = document.getElementById("uploadBtn");
 const generateBtn = document.getElementById("generateBtn");
 const downloadBtn = document.getElementById("downloadBtn");
 const downloadT13Btn = document.getElementById("downloadT13Btn");
+const downloadT13PdfBtn = document.getElementById("downloadT13PdfBtn");
 const downloadT13PdfFormBtn = document.getElementById("downloadT13PdfFormBtn");
 const downloadLogBtn = document.getElementById("downloadLogBtn");
 const previewFilter = document.getElementById("previewFilter");
@@ -168,6 +169,7 @@ uploadBtn.addEventListener("click", async () => {
   generateBtn.disabled = true;
   downloadBtn.disabled = true;
   downloadT13Btn.disabled = true;
+  downloadT13PdfBtn.disabled = true;
 
   const formData = new FormData();
   formData.append("payroll_file", payrollFile);
@@ -216,6 +218,7 @@ generateBtn.addEventListener("click", async () => {
   generateBtn.disabled = true;
   downloadBtn.disabled = true;
   downloadT13Btn.disabled = true;
+  downloadT13PdfBtn.disabled = true;
 
   try {
     const response = await fetch("/generate", {
@@ -251,6 +254,7 @@ generateBtn.addEventListener("click", async () => {
     updateLoadMoreButton();
     downloadBtn.disabled = false;
     downloadT13Btn.disabled = false;
+    downloadT13PdfBtn.disabled = false;
   } catch (error) {
     setStatus(`Ошибка: ${error.message}`);
   } finally {
@@ -264,6 +268,10 @@ downloadBtn.addEventListener("click", () => {
 
 downloadT13Btn.addEventListener("click", () => {
   window.location.href = "/download_t13";
+});
+
+downloadT13PdfBtn.addEventListener("click", () => {
+  window.location.href = "/download_t13_pdf";
 });
 
 downloadT13PdfFormBtn.addEventListener("click", () => {
