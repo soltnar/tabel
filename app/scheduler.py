@@ -1467,22 +1467,75 @@ def _find_t13_totals_columns(
 
 
 def _find_t13_first_employee_row(ws) -> int:
+    num_col, fio_col, tab_col, header_row = _find_t13_employee_columns(ws)
+    if header_row is not None:
+        return header_row + 1
+
     # 1) Классический случай: уже есть строка сотрудника (цифровой № + ФИО + таб.номер)
     for row in range(1, min(120, ws.max_row) + 1):
-        number = str(ws.cell(row=row, column=2).value or "").strip()
-        fio = str(ws.cell(row=row, column=3).value or "").strip()
-        tab_num = str(ws.cell(row=row, column=5).value or "").strip()
+        number = str(ws.cell(row=row, column=num_col).value or "").strip()
+        fio = str(ws.cell(row=row, column=fio_col).value or "").strip()
+        tab_num = str(ws.cell(row=row, column=tab_col).value or "").strip()
         if number.isdigit() and "(" in fio and tab_num:
             return row
 
     # 2) Шаблонный случай: в строке стоят плейсхолдеры формата {%<...>%}
     for row in range(1, min(180, ws.max_row) + 1):
-        c2 = str(ws.cell(row=row, column=2).value or "")
-        c3 = str(ws.cell(row=row, column=3).value or "")
-        c5 = str(ws.cell(row=row, column=5).value or "")
+        c2 = str(ws.cell(row=row, column=num_col).value or "")
+        c3 = str(ws.cell(row=row, column=fio_col).value or "")
+        c5 = str(ws.cell(row=row, column=tab_col).value or "")
         if "{%" in c2 and "{%" in c3 and "{%" in c5:
             return row
-    return 22
+    return 24
+
+
+def _find_t13_employee_columns(ws) -> tuple[int, int, int, Optional[int]]:
+    """
+    Возвращает (колонка №п/п, колонка ФИО, колонка таб.номера, строка заголовка с 1/2/3/4).
+    Поддерживает разные шаблоны Т-13.
+    """
+    max_scan_row = min(ws.max_row, 220)
+    max_scan_col = min(ws.max_column, 80)
+    best: Optional[tuple[int, int, int, int]] = None
+    for row in range(1, max_scan_row + 1):
+        cols_1 = []
+        cols_2 = []
+        cols_3 = []
+        cols_4 = []
+        for col in range(1, max_scan_col + 1):
+            txt = str(ws.cell(row=row, column=col).value or "").strip()
+            if txt == "1":
+                cols_1.append(col)
+            elif txt == "2":
+                cols_2.append(col)
+            elif txt == "3":
+                cols_3.append(col)
+            elif txt == "4":
+                cols_4.append(col)
+        for c1 in cols_1:
+            for c2 in cols_2:
+                if c2 <= c1:
+                    continue
+                for c3 in cols_3:
+                    if c3 <= c2:
+                        continue
+                    for c4 in cols_4:
+                        if c4 <= c3:
+                            continue
+                        # Отсеиваем случайные строки с большими разрывами.
+                        if c4 - c1 > 16:
+                            continue
+                        cand = (c1, c2, c3, row)
+                        if best is None:
+                            best = cand
+                        else:
+                            # Предпочитаем более "левый" заголовок.
+                            if cand[0] < best[0] or (cand[0] == best[0] and cand[3] < best[3]):
+                                best = cand
+    if best is not None:
+        return best[0], best[1], best[2], best[3]
+    # Дефолт для старого шаблона.
+    return 2, 3, 5, None
 
 
 def _find_t13_footer_row(ws, start_scan_row: int) -> Optional[int]:
@@ -1730,6 +1783,9 @@ def _find_t13_block_rows(
     start_row: int,
     first_half_map: dict[int, int],
     second_half_map: dict[int, int],
+    num_col: int = 2,
+    fio_col: int = 3,
+    tab_col: int = 5,
 ) -> list[int]:
     def _writable(row: int, col: int) -> bool:
         return ws.cell(row=row, column=col).__class__.__name__ != "MergedCell"
@@ -1746,13 +1802,16 @@ def _find_t13_block_rows(
     # 1) Основной путь: берем "якорные" строки сотрудников по шаблонным номерам/ФИО.
     anchor_rows: list[int] = []
     for row in range(max(1, start_row - 4), ws.max_row - 3):
-        number = str(ws.cell(row=row, column=2).value or "").strip()
-        fio = str(ws.cell(row=row, column=3).value or "").strip()
+        number = str(ws.cell(row=row, column=num_col).value or "").strip()
+        fio = str(ws.cell(row=row, column=fio_col).value or "").strip()
+        tab_num = str(ws.cell(row=row, column=tab_col).value or "").strip()
         if not number.isdigit():
             continue
-        if "(" not in fio:
+        if not fio or fio.isdigit():
             continue
-        if not (_writable(row, 2) and _writable(row, 3)):
+        if not tab_num:
+            continue
+        if not (_writable(row, num_col) and _writable(row, fio_col) and _writable(row, tab_col)):
             continue
         anchor_rows.append(row)
     if anchor_rows:
@@ -1763,11 +1822,14 @@ def _find_t13_block_rows(
     rows: list[int] = []
     row = max(1, start_row - 4)
     while row <= ws.max_row - 3:
-        c2 = ws.cell(row=row, column=2).value
-        c3 = ws.cell(row=row, column=3).value
-        c5 = ws.cell(row=row, column=5).value
-        has_left_part = bool(str(c2 or "").strip()) and bool(str(c3 or "").strip()) and bool(str(c5 or "").strip())
-        if has_left_part and _writable(row, 2) and _writable(row, 3) and _writable(row, 5) and _block_has_valid_day_grid(row):
+        c2 = ws.cell(row=row, column=num_col).value
+        c3 = ws.cell(row=row, column=fio_col).value
+        c5 = ws.cell(row=row, column=tab_col).value
+        c2_txt = str(c2 or "").strip()
+        c3_txt = str(c3 or "").strip()
+        c5_txt = str(c5 or "").strip()
+        has_left_part = bool(c2_txt) and bool(c3_txt) and bool(c5_txt) and not c3_txt.isdigit()
+        if has_left_part and _writable(row, num_col) and _writable(row, fio_col) and _writable(row, tab_col) and _block_has_valid_day_grid(row):
             if not rows or row - rows[-1] >= 4:
                 rows.append(row)
         row += 1
@@ -1788,6 +1850,7 @@ def _fill_t13_template_sheet(
     weekend_days_set = set(int(day) for day in (weekend_days or set()))
     first_half_map, second_half_map = _find_t13_day_columns(ws)
     totals_col_5, totals_col_6 = _find_t13_totals_columns(ws, first_half_map, second_half_map)
+    num_col, fio_col, tab_col, _header_row = _find_t13_employee_columns(ws)
     start_row = _find_t13_first_employee_row(ws)
     def _writable(row: int, col: int) -> bool:
         return ws.cell(row=row, column=col).__class__.__name__ != "MergedCell"
@@ -1815,26 +1878,28 @@ def _fill_t13_template_sheet(
         start_row=start_row,
         first_half_map=first_half_map,
         second_half_map=second_half_map,
+        num_col=num_col,
+        fio_col=fio_col,
+        tab_col=tab_col,
     )
 
-    assignments = result.assignments.copy()
-    if assignments.empty:
-        assignments = pd.DataFrame(columns=["employee", "day", "restaurant", "deficit"])
-    if "deficit" not in assignments.columns:
-        assignments["deficit"] = False
-    assignments = assignments[(~assignments["deficit"]) & (assignments["employee"] != DEFICIT_EMPLOYEE_LABEL)].copy()
-    assignments["day"] = pd.to_numeric(assignments.get("day"), errors="coerce").fillna(0).astype(int)
-    assignments["restaurant"] = assignments.get("restaurant", "").astype(str)
+    preview_df = build_preview_rows_t13_aligned(
+        result=result,
+        days=sorted_days,
+        weekend_days=weekend_days_set,
+    )
+    preview_df = preview_df[(~preview_df.get("deficit", False)) & (preview_df.get("employee", "") != DEFICIT_EMPLOYEE_LABEL)].copy()
+    preview_df["day"] = pd.to_numeric(preview_df.get("day"), errors="coerce").fillna(0).astype(int)
+    preview_df["restaurant"] = preview_df.get("restaurant", "").astype(str)
 
     details_map: dict[tuple[str, int], list[str]] = defaultdict(list)
-    day_hours_map: dict[tuple[str, int], float] = {}
-    for _, row in assignments.iterrows():
+    for _, row in preview_df.iterrows():
         key = (str(row["employee"]), int(row["day"]))
-        rest_name = str(row["restaurant"])
-        details_map[key].append(rest_name)
-    if not assignments.empty and "hours" in assignments.columns:
+        details_map[key].append(str(row["restaurant"]))
+    day_hours_map: dict[tuple[str, int], float] = {}
+    if not preview_df.empty and "hours" in preview_df.columns:
         day_hours_map = (
-            assignments.assign(hours=pd.to_numeric(assignments["hours"], errors="coerce").fillna(0.0))
+            preview_df.assign(hours=pd.to_numeric(preview_df["hours"], errors="coerce").fillna(0.0))
             .groupby(["employee", "day"], as_index=False)["hours"]
             .sum()
             .set_index(["employee", "day"])["hours"]
@@ -1877,9 +1942,9 @@ def _fill_t13_template_sheet(
 
     for r in block_rows:
         # Левая часть строки сотрудника.
-        for col in [2, 3]:
+        for col in [num_col, fio_col]:
             _set_cell_value_safe(ws, r, col, None)
-        _set_cell_value_safe(ws, r, 5, None)
+        _set_cell_value_safe(ws, r, tab_col, None)
         mapped_cols = list({**first_half_map, **second_half_map}.values())
         if mapped_cols:
             day_grid_start = max(1, min(mapped_cols))
@@ -1906,9 +1971,9 @@ def _fill_t13_template_sheet(
         payroll_hours_target = float(pd.to_numeric(rec["max_hours"], errors="coerce") or 0.0)
 
         r = block_rows[idx]
-        _set_cell_value_safe(ws, r, 2, str(idx + 1))
-        _set_cell_value_safe(ws, r, 3, f"{employee}\n({role})")
-        _set_cell_value_safe(ws, r, 5, tab_number if tab_number else "")
+        _set_cell_value_safe(ws, r, num_col, str(idx + 1))
+        _set_cell_value_safe(ws, r, fio_col, f"{employee}\n({role})")
+        _set_cell_value_safe(ws, r, tab_col, tab_number if tab_number else "")
         assigned_days = sorted({day for (emp_key, day) in day_hours_map.keys() if emp_key == employee})
         if assigned_days:
             selected_days = assigned_days
