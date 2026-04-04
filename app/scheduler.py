@@ -1694,6 +1694,17 @@ def _ensure_continuous_table_for_general_sheet(ws, start_row: int, required_bloc
 
     missing_blocks = required_blocks - available_blocks
     rows_to_insert = missing_blocks * 4
+    # В ряде шаблонов между последним блоком сотрудника и футером есть
+    # технический зазор (например 2 строки). Вставляем новые блоки в конец
+    # непрерывной табличной части, а не строго в footer_row.
+    insert_row = start_row + available_blocks * 4
+
+    # Сохраняем параметры строк футера/низа листа (высота/скрытие),
+    # чтобы после insert_rows подписи и нижняя часть не "съезжали".
+    saved_row_dims: dict[int, tuple[Optional[float], bool]] = {}
+    for row_idx in range(insert_row, ws.max_row + 1):
+        dim = ws.row_dimensions[row_idx]
+        saved_row_dims[row_idx] = (dim.height, bool(dim.hidden))
 
     # Паттерн стилей берём из первого блока сотрудника.
     style_source_rows = [start_row + i for i in range(4)]
@@ -1712,13 +1723,19 @@ def _ensure_continuous_table_for_general_sheet(ws, start_row: int, required_bloc
                 )
             )
 
-    ws.insert_rows(footer_row, amount=rows_to_insert)
+    ws.insert_rows(insert_row, amount=rows_to_insert)
+
+    # Восстанавливаем параметры сдвинутых строк футера.
+    for old_idx, (height, hidden) in saved_row_dims.items():
+        new_idx = old_idx + rows_to_insert
+        ws.row_dimensions[new_idx].height = height
+        ws.row_dimensions[new_idx].hidden = hidden
 
     # Копируем стиль/формат первого блока на новые строки.
     from copy import copy
 
     for i in range(rows_to_insert):
-        target_row = footer_row + i
+        target_row = insert_row + i
         src_row = style_source_rows[i % 4]
         if ws.row_dimensions.get(src_row) and ws.row_dimensions[src_row].height is not None:
             ws.row_dimensions[target_row].height = ws.row_dimensions[src_row].height
@@ -1802,7 +1819,9 @@ def _set_t13_header_identity(
     max_scan_row = min(ws.max_row, 160)
     max_scan_col = min(ws.max_column, 80)
     org_label_row: Optional[int] = None
+    org_label_col: Optional[int] = None
     sub_label_row: Optional[int] = None
+    sub_label_col: Optional[int] = None
     date_label_row: Optional[int] = None
     date_label_col: Optional[int] = None
 
@@ -1813,17 +1832,19 @@ def _set_t13_header_identity(
                 continue
             if org_label_row is None and "наименование организац" in text:
                 org_label_row = row
+                org_label_col = col
             if sub_label_row is None and "структурное подраздел" in text:
                 sub_label_row = row
+                sub_label_col = col
             if date_label_row is None and "дата составления" in text:
                 date_label_row, date_label_col = row, col
 
-    if organization_name and org_label_row and org_label_row > 1:
-        _set_cell_value_safe(ws, org_label_row - 1, 1, str(organization_name))
+    if organization_name and org_label_row and org_label_col and org_label_row > 1:
+        _set_cell_value_safe(ws, org_label_row - 1, org_label_col, str(organization_name))
 
-    if sub_label_row and sub_label_row > 1:
+    if sub_label_row and sub_label_col and sub_label_row > 1:
         value = str(subdivision_name or "").strip()
-        _set_cell_value_safe(ws, sub_label_row - 1, 1, value)
+        _set_cell_value_safe(ws, sub_label_row - 1, sub_label_col, value)
 
     if date_label_row is not None and date_label_col is not None:
         _set_cell_value_safe(ws, date_label_row + 1, date_label_col, datetime.now().strftime("%d.%m.%Y"))
@@ -1992,6 +2013,7 @@ def _fill_t13_template_sheet(
     fill_count = min(len(employee_base), max_blocks)
 
     for r in block_rows:
+        _normalize_day_grid_merges_for_block(ws, r, first_half_map, second_half_map)
         # Левая часть строки сотрудника.
         for col in [num_col, fio_col]:
             _set_cell_value_safe(ws, r, col, None)
@@ -2023,6 +2045,12 @@ def _fill_t13_template_sheet(
 
         r = block_rows[idx]
         _set_cell_value_safe(ws, r, num_col, str(idx + 1))
+        _set_cell_alignment_safe(
+            ws,
+            r,
+            num_col,
+            Alignment(horizontal="center", vertical="center", wrap_text=False),
+        )
         _set_cell_value_safe(ws, r, fio_col, f"{employee}\n({role})")
         _set_cell_alignment_safe(
             ws,
@@ -2031,6 +2059,12 @@ def _fill_t13_template_sheet(
             Alignment(horizontal="center", vertical="center", wrap_text=True),
         )
         _set_cell_value_safe(ws, r, tab_col, tab_number if tab_number else "")
+        _set_cell_alignment_safe(
+            ws,
+            r,
+            tab_col,
+            Alignment(horizontal="center", vertical="center", wrap_text=False),
+        )
         assigned_days = sorted({day for (emp_key, day) in day_hours_map.keys() if emp_key == employee})
         if assigned_days:
             selected_days = assigned_days
