@@ -1,0 +1,112 @@
+name: Build Windows portable
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install application and packager
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller==6.16.0
+
+      - name: Build portable application
+        shell: pwsh
+        run: |
+          pyinstaller `
+            --noconfirm `
+            --clean `
+            --onedir `
+            --console `
+            --name Tabel `
+            --add-data "static;static" `
+            --add-data "templates;templates" `
+            --add-data "VERSION;." `
+            --collect-all holidays `
+            --collect-all reportlab `
+            --collect-all openpyxl `
+            --collect-submodules uvicorn `
+            --hidden-import multipart `
+            windows_launcher.py
+
+          New-Item -ItemType Directory -Force -Path dist/Tabel/outputs | Out-Null
+          New-Item -ItemType Directory -Force -Path dist/Tabel/logs/errors | Out-Null
+          Copy-Item "ЛОКАЛЬНЫЙ_ЗАПУСК_WINDOWS.txt" "dist/Tabel/ПРОЧИТАЙТЕ_МЕНЯ.txt"
+
+      - name: Smoke test executable
+        shell: pwsh
+        run: |
+          $env:TABEL_NO_BROWSER = "1"
+          $process = Start-Process `
+            -FilePath "dist/Tabel/Tabel.exe" `
+            -PassThru `
+            -WindowStyle Hidden
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 500
+              try {
+                $response = Invoke-RestMethod "http://127.0.0.1:8000/version"
+                if ($response.version -eq (Get-Content VERSION -Raw).Trim()) {
+                  $ready = $true
+                  break
+                }
+              } catch {
+                # The executable is still starting.
+              }
+            }
+            if (-not $ready) {
+              throw "Portable executable did not start or returned a wrong version."
+            }
+          } finally {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $archive = "tabel_windows_portable_v$version.zip"
+          Compress-Archive -Path "dist/Tabel" -DestinationPath $archive
+          "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tabel-windows-portable
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            "$env:ARCHIVE" `
+            --title "Tabel ${{ github.ref_name }}" `
+            --notes "Автономная Windows-сборка. Python устанавливать не требуется."
