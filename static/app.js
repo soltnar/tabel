@@ -1,7 +1,10 @@
 const payrollInput = document.getElementById("payrollFile");
+const personnelEventsInput = document.getElementById("personnelEventsFile");
+const timesheetInput = document.getElementById("timesheetFiles");
 
 const uploadBtn = document.getElementById("uploadBtn");
 const generateBtn = document.getElementById("generateBtn");
+const validateBtn = document.getElementById("validateBtn");
 const downloadBtn = document.getElementById("downloadBtn");
 const downloadT13Btn = document.getElementById("downloadT13Btn");
 const downloadT13PdfBtn = document.getElementById("downloadT13PdfBtn");
@@ -67,6 +70,8 @@ function renderPreview(rows, totalRowsCount = rows.length) {
     const tr = document.createElement("tr");
     if (row.deficit) {
       tr.classList.add("row-deficit");
+    } else if (row.payroll_correction) {
+      tr.classList.add("row-payroll-correction");
     } else if (row.cross_restaurant) {
       tr.classList.add("row-cross");
     }
@@ -74,6 +79,8 @@ function renderPreview(rows, totalRowsCount = rows.length) {
     let statusText = row.status || "ОК";
     if (row.deficit) {
       statusText = "ДЕФИЦИТ";
+    } else if (row.payroll_correction) {
+      statusText = "Требуется правка расчетного листа";
     } else if (row.cross_restaurant) {
       statusText = "Межресторанная замена";
     }
@@ -160,18 +167,25 @@ uploadBtn.addEventListener("click", async () => {
   const payrollFile = payrollInput.files[0];
 
   if (!payrollFile) {
-    setStatus("Выберите файл расчетных листков перед загрузкой.");
+    setStatus("Выберите годовую расчетную ведомость перед загрузкой.");
     return;
   }
 
   setStatus("Загрузка и разбор файлов...");
   generateBtn.disabled = true;
+  validateBtn.disabled = true;
   downloadBtn.disabled = true;
   downloadT13Btn.disabled = true;
   downloadT13PdfBtn.disabled = true;
 
   const formData = new FormData();
   formData.append("payroll_file", payrollFile);
+  if (personnelEventsInput.files[0]) {
+    formData.append("personnel_events_file", personnelEventsInput.files[0]);
+  }
+  for (const file of timesheetInput.files) {
+    formData.append("timesheet_files", file);
+  }
 
   try {
     const response = await fetch("/upload", {
@@ -200,6 +214,7 @@ uploadBtn.addEventListener("click", async () => {
     );
 
     generateBtn.disabled = false;
+    validateBtn.disabled = false;
     previewRows = [];
     previewTotal = 0;
     previewNextOffset = 0;
@@ -209,6 +224,48 @@ uploadBtn.addEventListener("click", async () => {
     updateLoadMoreButton();
   } catch (error) {
     setStatus(`Ошибка: ${error.message}`);
+  }
+});
+
+validateBtn.addEventListener("click", async () => {
+  setStatus("Проверка входных данных и загруженных табелей...");
+  validateBtn.disabled = true;
+  generateBtn.disabled = true;
+
+  try {
+    const response = await fetch("/validate", { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(formatApiDetail(data.detail) || "Ошибка проверки");
+    }
+
+    const issueLines = (data.issues || []).slice(0, 40).map((issue) => {
+      const employee = issue.employee ? `, ${issue.employee}` : "";
+      const day = issue.day ? `, день ${issue.day}` : "";
+      const values =
+        issue.actual !== null && issue.actual !== undefined
+          ? ` [факт: ${issue.actual}${issue.expected !== null && issue.expected !== undefined ? `; должно быть: ${issue.expected}` : ""}]`
+          : "";
+      return `- ${issue.severity}: ${issue.details}${employee}${day}${values}`;
+    });
+    const hiddenIssues = Math.max(0, (data.issues_count || 0) - issueLines.length);
+    const inputWarnings = (data.input_warnings || []).map((warning) => `- ${warning}`);
+    const details = [...issueLines, ...inputWarnings];
+    if (hiddenIssues) {
+      details.push(`- Еще нарушений: ${hiddenIssues}. Полный перечень записан в app.log.`);
+    }
+
+    setStatus(
+      `${data.message}\n` +
+        `Проверено файлов Т-13: ${data.checked_files}, сотрудников: ${data.employees_checked}. ` +
+        `Критических: ${data.critical_count}, ошибок: ${data.error_count}, предупреждений: ${data.warning_count}.` +
+        (details.length ? `\n\nРезультаты:\n${details.join("\n")}` : "\nНарушений не обнаружено.")
+    );
+  } catch (error) {
+    setStatus(`Ошибка: ${error.message}`);
+  } finally {
+    validateBtn.disabled = false;
+    generateBtn.disabled = false;
   }
 });
 

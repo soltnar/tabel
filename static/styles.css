@@ -66,6 +66,10 @@ h2 {
   color: var(--muted);
 }
 
+.file-label small {
+  color: #738396;
+}
+
 input[type="file"] {
   padding: 8px;
   border: 1px dashed var(--border);
@@ -97,6 +101,22 @@ button:disabled {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.button-secondary {
+  color: var(--accent);
+  background: #e7f4f3;
+  border: 1px solid #9dcac7;
+}
+
+.button-secondary:hover:enabled {
+  color: #fff;
 }
 
 .status {
@@ -175,6 +195,10 @@ th {
 
 .row-deficit {
   background: #ffe8e8;
+}
+
+.row-payroll-correction {
+  background: #ffe2c2;
 }
 
 .row-cross {

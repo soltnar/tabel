@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import logging
 from pathlib import Path
 import re
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -29,6 +29,7 @@ from app.scheduler import (
     export_t13_to_excel,
     generate_schedule,
 )
+from app.validation import validate_uploaded_timesheets
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
@@ -48,6 +49,7 @@ class RuntimeState:
     output_path: Optional[Path] = None
     t13_output_path: Optional[Path] = None
     t13_pdf_output_path: Optional[Path] = None
+    timesheet_files: List[tuple[str, bytes]] = field(default_factory=list)
 
 
 class GenerateRequest(BaseModel):
@@ -125,6 +127,9 @@ def root() -> FileResponse:
 async def upload_files(
     payroll_file: UploadFile = File(...),
     employees_file: Optional[UploadFile] = File(None),
+    payroll_register_file: Optional[UploadFile] = File(None),
+    personnel_events_file: Optional[UploadFile] = File(None),
+    timesheet_files: Optional[List[UploadFile]] = File(None),
 ) -> dict:
     if not payroll_file.filename:
         raise HTTPException(status_code=400, detail="Обязателен файл расчетных листков.")
@@ -132,11 +137,38 @@ async def upload_files(
     try:
         payroll_bytes = await payroll_file.read()
         employees_bytes = await employees_file.read() if employees_file and employees_file.filename else None
+        uploaded_register_bytes = (
+            await payroll_register_file.read()
+            if payroll_register_file and payroll_register_file.filename
+            else None
+        )
+        payroll_register_bytes = uploaded_register_bytes or payroll_bytes
+        payroll_register_filename = (
+            payroll_register_file.filename
+            if payroll_register_file and payroll_register_file.filename
+            else payroll_file.filename
+        )
+        personnel_events_bytes = (
+            await personnel_events_file.read()
+            if personnel_events_file and personnel_events_file.filename
+            else None
+        )
+        timesheet_payload = []
+        for file in timesheet_files or []:
+            if file.filename:
+                timesheet_payload.append((file.filename, await file.read()))
 
         prepared = prepare_input(
             payroll_bytes=payroll_bytes,
             payroll_filename=payroll_file.filename,
             employees_bytes=employees_bytes,
+            payroll_register_bytes=payroll_register_bytes,
+            payroll_register_filename=payroll_register_filename,
+            personnel_events_bytes=personnel_events_bytes,
+            personnel_events_filename=(
+                personnel_events_file.filename if personnel_events_file else None
+            ),
+            timesheet_files=timesheet_payload,
         )
     except ValueError as exc:
         logger.warning("Ошибка пользовательских данных при загрузке: %s", exc)
@@ -144,18 +176,64 @@ async def upload_files(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_internal_error_detail("Ошибка разбора Excel", exc)) from exc
 
-    app.state.runtime = RuntimeState(prepared=prepared)
+    app.state.runtime = RuntimeState(prepared=prepared, timesheet_files=timesheet_payload)
 
     return {
         "message": "Файлы успешно загружены и обработаны.",
         "files": {
             "payroll": payroll_file.filename,
             "employees": employees_file.filename if employees_file and employees_file.filename else None,
+            "payroll_register": (
+                payroll_register_filename
+            ),
+            "personnel_events": (
+                personnel_events_file.filename if personnel_events_file and personnel_events_file.filename else None
+            ),
+            "timesheets": [name for name, _ in timesheet_payload],
         },
         "summary": prepared.summary,
         "role_group_defaults": prepared.role_group_defaults,
         "warnings": prepared.warnings,
     }
+
+
+@app.post("/validate")
+def validate() -> dict:
+    runtime: RuntimeState = app.state.runtime
+    if runtime.prepared is None:
+        raise HTTPException(status_code=400, detail="Сначала загрузите файлы через /upload.")
+
+    try:
+        result = validate_uploaded_timesheets(
+            prepared=runtime.prepared,
+            timesheet_files=runtime.timesheet_files,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=_internal_error_detail("Ошибка проверки входных данных и табелей", exc),
+        ) from exc
+
+    logger.info(
+        "Проверка завершена: files=%s employees=%s critical=%s errors=%s warnings=%s",
+        result["checked_files"],
+        result["employees_checked"],
+        result["critical_count"],
+        result["error_count"],
+        result["warning_count"],
+    )
+    for issue in result["issues"]:
+        logger.warning(
+            "Проверка Т-13 | severity=%s code=%s employee=%s tab=%s day=%s source=%s details=%s",
+            issue["severity"],
+            issue["code"],
+            issue["employee"],
+            issue["tab_number"],
+            issue["day"],
+            issue["source"],
+            issue["details"],
+        )
+    return jsonable_encoder(result)
 
 
 @app.post("/generate")
@@ -197,6 +275,8 @@ def generate(payload: Optional[GenerateRequest] = None) -> dict:
             employees_df=employees_df,
             days=runtime.prepared.days,
             weekend_days=set(runtime.prepared.weekend_days),
+            period_year=runtime.prepared.period_year,
+            period_month=runtime.prepared.period_month,
         )
     except ScheduleGenerationError as exc:
         logger.warning("Ошибка генерации (валидация): %s", exc)
@@ -235,6 +315,9 @@ def generate(payload: Optional[GenerateRequest] = None) -> dict:
             period_month=runtime.prepared.period_month,
             source_xlsx_path=t13_output_path,
         )
+    except ScheduleGenerationError as exc:
+        logger.warning("Экспорт отменен из-за несовместимых ограничений: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_internal_error_detail("Ошибка сохранения результата", exc)) from exc
 
@@ -244,6 +327,7 @@ def generate(payload: Optional[GenerateRequest] = None) -> dict:
         output_path=output_path,
         t13_output_path=t13_output_path,
         t13_pdf_output_path=t13_pdf_output_path,
+        timesheet_files=runtime.timesheet_files,
     )
 
     violations = result.employee_summary[(~result.employee_summary["hours_ok"]) | (~result.employee_summary["days_ok"])]

@@ -18,8 +18,19 @@
         <h2>1. Загрузка файлов</h2>
 
         <label class="file-label">
-          <span>Расчетные листки (лимит часов/дней)</span>
+          <span>Годовая расчетная ведомость</span>
+          <small>Единый приоритетный источник: дни, часы, отпуска, больничные и возраст.</small>
           <input id="payrollFile" type="file" accept=".xlsx,.xls" />
+        </label>
+
+        <label class="file-label">
+          <span>Прием и увольнение сотрудников</span>
+          <input id="personnelEventsFile" type="file" accept=".xlsx,.xls" />
+        </label>
+
+        <label class="file-label">
+          <span>Существующие табели Т-13 для ручных корректировок (необязательно)</span>
+          <input id="timesheetFiles" type="file" accept=".xlsx" multiple />
         </label>
 
         <button id="uploadBtn">Загрузить файлы</button>
@@ -44,7 +55,10 @@
             </table>
           </div>
         </div>
-        <button id="generateBtn" disabled>Сгенерировать</button>
+        <div class="action-buttons">
+          <button id="generateBtn" disabled>Сгенерировать</button>
+          <button id="validateBtn" class="button-secondary" disabled>Только проверить</button>
+        </div>
       </section>
 
       <section class="card">

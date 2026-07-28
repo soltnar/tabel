@@ -11,6 +11,17 @@ import re
 
 import pandas as pd
 
+from app.work_rules import (
+    employment_allowed_days,
+    infer_timesheet_period,
+    minor_daily_cap,
+    normalize_name,
+    normalize_tab,
+    parse_annual_payroll_register,
+    parse_personnel_events,
+    parse_t13_overrides,
+)
+
 ROLE_GROUP_KITCHEN = "Кухня"
 ROLE_GROUP_HALL = "Зал"
 ROLE_GROUP_CASH = "Касса"
@@ -552,7 +563,52 @@ def _parse_payroll_blocks(file_bytes: bytes) -> pd.DataFrame:
     return result
 
 
-def parse_payroll(file_bytes: bytes) -> pd.DataFrame:
+def _parse_annual_payroll_as_primary(
+    file_bytes: bytes,
+    year: int,
+    month: int,
+    filename: Optional[str] = None,
+) -> pd.DataFrame:
+    register = parse_annual_payroll_register(
+        file_bytes,
+        year=year,
+        month=month,
+        filename=filename,
+    )
+    rows: list[dict[str, Any]] = []
+    for rec in register.values():
+        days = rec.get("register_days")
+        hours = rec.get("register_hours")
+        if not days or hours is None:
+            continue
+        rows.append(
+            {
+                "employee": _clean_employee_name(rec.get("employee", "")),
+                "payroll_hours": float(hours),
+                "payroll_days": float(days),
+                "max_hours": float(hours),
+                "max_days": int(days),
+                "restaurant": "не указан",
+                "role": _normalize_text(rec.get("role", "")) or "не указана",
+                "tab_number": str(rec.get("tab_number", "") or ""),
+                "organization": str(rec.get("organization", "") or ""),
+                "first_half_pay": 0.0,
+                "second_half_pay": 0.0,
+                "half_preference": "neutral",
+            }
+        )
+    if not rows:
+        raise ValueError(
+            f"В годовой расчетной ведомости не найдены рабочие дни и часы за {month:02d}.{year}."
+        )
+    return pd.DataFrame(rows).drop_duplicates(subset=["tab_number", "employee"], keep="first")
+
+
+def parse_payroll(
+    file_bytes: bytes,
+    period: Optional[tuple[int, int]] = None,
+    filename: Optional[str] = None,
+) -> pd.DataFrame:
     # Для расчетных листков 1С (блочный формат по сотрудникам) сначала пробуем профильный парсер.
     try:
         block_result = _parse_payroll_blocks(file_bytes)
@@ -571,6 +627,13 @@ def parse_payroll(file_bytes: bytes) -> pd.DataFrame:
         df = _find_sheet_with_columns(file_bytes, patterns)
         mapping = _find_columns(list(df.columns), patterns)
     except ValueError:
+        if period:
+            return _parse_annual_payroll_as_primary(
+                file_bytes,
+                year=period[0],
+                month=period[1],
+                filename=filename,
+            )
         return _parse_payroll_blocks(file_bytes)
 
     optional_patterns = {
@@ -872,10 +935,13 @@ def parse_calendar_from_payroll(
     payroll_df: pd.DataFrame,
     payroll_bytes: Optional[bytes] = None,
     payroll_filename: Optional[str] = None,
+    period: Optional[tuple[int, int]] = None,
 ) -> tuple[list[int], list[int]]:
     del payroll_df  # календарь читается из шапки файла и периода, а не из агрегированных строк.
 
-    detected_period = _detect_payroll_period(payroll_bytes, payroll_filename) if payroll_bytes else None
+    detected_period = period
+    if detected_period is None and payroll_bytes:
+        detected_period = _detect_payroll_period(payroll_bytes, payroll_filename)
     if detected_period is None:
         # Fallback: если период не нашли, оставляем прежнее поведение.
         days = list(range(1, 32))
@@ -902,17 +968,32 @@ def prepare_input(
     payroll_bytes: bytes,
     payroll_filename: Optional[str] = None,
     employees_bytes: Optional[bytes] = None,
+    payroll_register_bytes: Optional[bytes] = None,
+    payroll_register_filename: Optional[str] = None,
+    personnel_events_bytes: Optional[bytes] = None,
+    personnel_events_filename: Optional[str] = None,
+    timesheet_files: Optional[list[tuple[str, bytes]]] = None,
 ) -> PreparedInput:
-    payroll_df = parse_payroll(payroll_bytes)
-    detected_period = _detect_payroll_period(payroll_bytes, payroll_filename)
+    timesheet_period = infer_timesheet_period(timesheet_files or [])
+    detected_period = timesheet_period or _detect_payroll_period(payroll_bytes, payroll_filename)
+    payroll_df = parse_payroll(
+        payroll_bytes,
+        period=detected_period,
+        filename=payroll_filename,
+    )
     days, weekend_days = parse_calendar_from_payroll(
         payroll_df=payroll_df,
         payroll_bytes=payroll_bytes,
         payroll_filename=payroll_filename,
+        period=detected_period,
     )
 
     merged = payroll_df.copy()
     warnings: list[str] = []
+    if timesheet_period:
+        warnings.append(
+            f"Период {timesheet_period[1]:02d}.{timesheet_period[0]} определен по загруженному табелю Т-13."
+        )
 
     if employees_bytes:
         employees_df = parse_employee_list(employees_bytes)
@@ -959,6 +1040,114 @@ def prepare_input(
     if "half_preference" not in merged.columns:
         merged["half_preference"] = "neutral"
 
+    year = detected_period[0] if detected_period else None
+    month = detected_period[1] if detected_period else None
+    personnel_intervals: dict[str, list[tuple[Optional[date], Optional[date]]]] = {}
+    register_meta: dict[str, dict[str, Any]] = {}
+    t13_overrides: dict[str, dict[str, Any]] = {}
+
+    if personnel_events_bytes:
+        personnel_intervals = parse_personnel_events(
+            personnel_events_bytes,
+            personnel_events_filename,
+        )
+        warnings.append(f"Загружены кадровые события: {len(personnel_intervals)} сотрудников.")
+
+    if payroll_register_bytes:
+        if year is None or month is None:
+            warnings.append(
+                "Годовая расчетная ведомость загружена, но период основного расчетного листа не определен."
+            )
+        else:
+            register_meta = parse_annual_payroll_register(
+                payroll_register_bytes,
+                year=year,
+                month=month,
+                filename=payroll_register_filename,
+            )
+            warnings.append(f"Годовая расчетная ведомость: найдено {len(register_meta)} сотрудников.")
+
+    if timesheet_files:
+        if year is None or month is None:
+            warnings.append("Табели загружены, но период основного расчетного листа не определен.")
+        else:
+            t13_overrides = parse_t13_overrides(timesheet_files, year=year, month=month)
+            warnings.append(f"Ручные табели: найдены корректировки для {len(t13_overrides)} сотрудников.")
+
+    metadata_rows: list[dict[str, Any]] = []
+    all_month_days = set(days)
+    for _, employee_row in merged.iterrows():
+        employee = str(employee_row.get("employee", "") or "")
+        employee_key = normalize_name(employee)
+        tab_number = normalize_tab(employee_row.get("tab_number", ""))
+        register = register_meta.get(tab_number) or register_meta.get(employee_key) or {}
+        if not register:
+            register = next(
+                (
+                    rec
+                    for rec in register_meta.values()
+                    if normalize_name(rec.get("employee", "")) == employee_key
+                ),
+                {},
+            )
+
+        intervals = personnel_intervals.get(employee_key, [])
+        allowed_days = (
+            employment_allowed_days(intervals, year, month)
+            if year is not None and month is not None
+            else set(all_month_days)
+        )
+        vacation_days = set(register.get("vacation_days", set()))
+        sick_days = set(register.get("sick_days", set()))
+        absence_codes = {day: "ОТ" for day in vacation_days}
+        absence_codes.update({day: "Б" for day in sick_days})
+
+        override = t13_overrides.get(tab_number, {})
+        fixed_work_hours = dict(override.get("work_hours", {}))
+        absence_codes.update(dict(override.get("absence_codes", {})))
+        blocked_days = vacation_days | sick_days | set(absence_codes)
+        allowed_days -= blocked_days
+
+        birth_date = register.get("birth_date")
+        daily_caps: dict[int, float] = {}
+        if year is not None and month is not None:
+            for day in days:
+                cap = minor_daily_cap(birth_date, date(year, month, day))
+                if cap < 13.0:
+                    daily_caps[day] = cap
+                    # Несовершеннолетних не планируем в выходные и праздники.
+                    if day in weekend_days:
+                        allowed_days.discard(day)
+
+        register_days = register.get("register_days")
+        register_hours = register.get("register_hours")
+        if register_days is not None and int(register_days) != int(employee_row["max_days"]):
+            warnings.append(
+                f"{employee}: смены в основном расчетном листе {int(employee_row['max_days'])}, "
+                f"в годовой ведомости {int(register_days)}. Использован основной расчетный лист."
+            )
+        if register_hours is not None and abs(float(register_hours) - float(employee_row["max_hours"])) > 0.02:
+            warnings.append(
+                f"{employee}: часы в основном расчетном листе {float(employee_row['max_hours']):g}, "
+                f"в годовой ведомости {float(register_hours):g}. Использован основной расчетный лист."
+            )
+
+        metadata_rows.append(
+            {
+                "allowed_days": sorted(allowed_days),
+                "blocked_days": sorted(blocked_days),
+                "absence_codes": absence_codes,
+                "fixed_work_hours": fixed_work_hours,
+                "daily_caps": daily_caps,
+                "birth_date": birth_date,
+                "employment_intervals": intervals,
+            }
+        )
+
+    metadata_df = pd.DataFrame(metadata_rows, index=merged.index)
+    for col in metadata_df.columns:
+        merged[col] = metadata_df[col]
+
     merged = merged[
         [
             "employee",
@@ -972,6 +1161,13 @@ def prepare_input(
             "first_half_pay",
             "second_half_pay",
             "half_preference",
+            "allowed_days",
+            "blocked_days",
+            "absence_codes",
+            "fixed_work_hours",
+            "daily_caps",
+            "birth_date",
+            "employment_intervals",
         ]
     ].copy()
     merged["max_hours"] = merged["max_hours"].astype(float)
@@ -1001,6 +1197,9 @@ def prepare_input(
         # Backward compatibility for old frontend keys.
         "days_in_template": int(len(days)),
         "weekend_days_in_template": int(len(weekend_days)),
+        "personnel_events_employees": int(len(personnel_intervals)),
+        "register_employees": int(len(register_meta)),
+        "timesheet_override_employees": int(len(t13_overrides)),
     }
     if "organization" in merged.columns:
         org_series = merged["organization"].fillna("").astype(str).str.strip()

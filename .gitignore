@@ -3,5 +3,9 @@ __pycache__/
 *.pyc
 .DS_Store
 outputs/*.xlsx
+outputs/*.pdf
 logs/*.log
 logs/errors/*.log
+dist/
+templates/*.backup_*.xlsx
+templates/*.pre_*_backup.xlsx

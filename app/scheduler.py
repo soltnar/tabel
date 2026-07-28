@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 import calendar
 from io import BytesIO
 from pathlib import Path
@@ -84,7 +84,7 @@ class ScheduleResult:
 
 
 class _EmployeeState:
-    def __init__(self, row: pd.Series) -> None:
+    def __init__(self, row: pd.Series, period_year: Optional[int] = None, period_month: Optional[int] = None) -> None:
         self.employee = str(row["employee"])
         self.restaurant = str(row["restaurant"])
         self.tab_number = str(row.get("tab_number", "") or "")
@@ -95,6 +95,21 @@ class _EmployeeState:
         self.first_half_pay = float(pd.to_numeric(row.get("first_half_pay", 0.0), errors="coerce") or 0.0)
         self.second_half_pay = float(pd.to_numeric(row.get("second_half_pay", 0.0), errors="coerce") or 0.0)
         self.half_preference = str(row.get("half_preference", "neutral") or "neutral")
+        self.allowed_days = set(int(day) for day in (row.get("allowed_days", []) or []))
+        self.daily_caps = {
+            int(day): float(cap) for day, cap in dict(row.get("daily_caps", {}) or {}).items()
+        }
+        self.fixed_work_hours = {
+            int(day): float(hours)
+            for day, hours in dict(row.get("fixed_work_hours", {}) or {}).items()
+        }
+        self.absence_codes = {
+            int(day): str(code) for day, code in dict(row.get("absence_codes", {}) or {}).items()
+        }
+        self.blocked_days = set(int(day) for day in (row.get("blocked_days", []) or []))
+        self.birth_date = row.get("birth_date")
+        self.period_year = period_year
+        self.period_month = period_month
 
         self.used_hours = 0.0
         self.used_days = 0
@@ -201,6 +216,10 @@ def _can_share_same_shift(emp: _EmployeeState, day: int, shift_key: str, role_gr
 
 
 def _can_take_shift_for_group(emp: _EmployeeState, day: int, shift: Shift, role_group: str) -> bool:
+    if day not in emp.allowed_days:
+        return False
+    if day in emp.blocked_days:
+        return False
     new_day = day not in emp.assigned_days
 
     same_shift_exists = shift.key in emp.daily_shift_keys[day]
@@ -221,7 +240,8 @@ def _can_take_shift_for_group(emp: _EmployeeState, day: int, shift: Shift, role_
         return False
 
     if not shared_same_shift:
-        if emp.daily_hours[day] + shift.hours > 13.0 + 1e-9:
+        daily_cap = float(emp.daily_caps.get(day, 13.0))
+        if emp.daily_hours[day] + shift.hours > daily_cap + 1e-9:
             return False
 
     if new_day:
@@ -416,6 +436,8 @@ def generate_schedule(
     employees_df: pd.DataFrame,
     days: list[int],
     weekend_days: Optional[set[int]] = None,
+    period_year: Optional[int] = None,
+    period_month: Optional[int] = None,
 ) -> ScheduleResult:
     if employees_df.empty:
         raise ScheduleGenerationError("Нет сотрудников для планирования.")
@@ -423,7 +445,10 @@ def generate_schedule(
     if not days:
         raise ScheduleGenerationError("В шаблоне табеля не найдены дни месяца.")
 
-    states = [_EmployeeState(row) for _, row in employees_df.iterrows()]
+    states = [
+        _EmployeeState(row, period_year=period_year, period_month=period_month)
+        for _, row in employees_df.iterrows()
+    ]
 
     by_group: dict[tuple[str, str], list[_EmployeeState]] = defaultdict(list)
     for state in states:
@@ -667,6 +692,12 @@ def generate_schedule(
                 "first_half_pay": round(emp.first_half_pay, 2),
                 "second_half_pay": round(emp.second_half_pay, 2),
                 "half_preference": emp.half_preference,
+                "allowed_days": sorted(emp.allowed_days),
+                "blocked_days": sorted(emp.blocked_days),
+                "absence_codes": emp.absence_codes,
+                "fixed_work_hours": emp.fixed_work_hours,
+                "daily_caps": emp.daily_caps,
+                "birth_date": emp.birth_date,
                 "hours_ok": emp.used_hours <= emp.max_hours + 1e-9,
                 "days_ok": emp.used_days <= emp.max_days,
                 "cross_restaurant_shifts": int(cross_by_employee.get(emp.employee, 0)),
@@ -830,6 +861,9 @@ def export_schedule_to_excel(
         result.assignments.to_excel(writer, index=False, sheet_name="График (сырье)")
         result.employee_summary.to_excel(writer, index=False, sheet_name="Сводка")
         result.matrix.to_excel(writer, index=False, sheet_name="Матрица (тех.)")
+        pd.DataFrame(
+            {"Предупреждения": result.warnings or ["Предупреждений нет."]}
+        ).to_excel(writer, index=False, sheet_name="Предупреждения")
 
         ws_matrix = writer.sheets.get("Матрица графика")
         if ws_matrix is not None and ws_matrix.max_row >= 2:
@@ -883,9 +917,17 @@ def build_preview_rows_t13_aligned(
                 "max_days",
                 "max_hours",
                 "half_preference",
+                "allowed_days",
+                "blocked_days",
+                "absence_codes",
+                "fixed_work_hours",
+                "daily_caps",
+                "birth_date",
             ]
         ]
-        .drop_duplicates()
+        .drop_duplicates(
+            subset=["employee", "restaurant", "tab_number", "role", "role_group"]
+        )
         .sort_values(["restaurant", "role", "employee"])
         .reset_index(drop=True)
     )
@@ -899,19 +941,49 @@ def build_preview_rows_t13_aligned(
         half_preference = str(rec.get("half_preference", "neutral") or "neutral")
         payroll_days_target = int(pd.to_numeric(rec["max_days"], errors="coerce") or 0)
         payroll_hours_target = float(pd.to_numeric(rec["max_hours"], errors="coerce") or 0.0)
+        allowed_days = set(int(day) for day in (rec.get("allowed_days", sorted_days) or []))
+        fixed_work_hours = {
+            int(day): float(hours)
+            for day, hours in dict(rec.get("fixed_work_hours", {}) or {}).items()
+        }
+        daily_caps = {
+            int(day): float(cap)
+            for day, cap in dict(rec.get("daily_caps", {}) or {}).items()
+        }
 
         factual_days = sorted({day for (emp_key, day) in day_restaurants_map.keys() if emp_key == employee})
-        selected_days = _select_employee_days(
-            factual_days=factual_days,
-            all_days=sorted_days,
-            target_count=payroll_days_target,
-            prefer_weekends=_is_core_group(role_group),
-            weekend_days=weekend_days_set,
-            half_preference=half_preference,
-        )
+        try:
+            selected_days = _select_employee_days(
+                factual_days=factual_days,
+                all_days=sorted_days,
+                target_count=payroll_days_target,
+                prefer_weekends=_is_core_group(role_group),
+                weekend_days=weekend_days_set,
+                half_preference=half_preference,
+                allowed_days=allowed_days,
+                fixed_days=set(fixed_work_hours),
+            )
 
-        day_hours = _distribute_hours(payroll_hours_target, len(selected_days))
-        hours_map = {day: day_hours[pos] for pos, day in enumerate(selected_days)}
+            hours_map = _distribute_hours_constrained(
+                payroll_hours_target,
+                selected_days,
+                daily_caps=daily_caps,
+                fixed_work_hours=fixed_work_hours,
+            )
+        except ScheduleGenerationError as exc:
+            tab_number = str(rec.get("tab_number", "") or "не указан")
+            raise ScheduleGenerationError(
+                f"Сотрудник: {employee}, табельный № {tab_number}. {exc}"
+            ) from exc
+        payroll_correction = _record_payroll_correction_warning(
+            result=result,
+            employee=employee,
+            tab_number=str(rec.get("tab_number", "") or ""),
+            payroll_days=payroll_days_target,
+            payroll_hours=payroll_hours_target,
+            selected_days=selected_days,
+            hours_map=hours_map,
+        )
 
         for day in selected_days:
             worked_restaurants = sorted(day_restaurants_map.get((employee, day), set()))
@@ -920,7 +992,9 @@ def build_preview_rows_t13_aligned(
             display_restaurant = worked_restaurants[0] if worked_restaurants else home_restaurant
 
             status = "ОК"
-            if not factual:
+            if payroll_correction:
+                status = "ТРЕБУЕТСЯ ПРАВКА РАСЧЕТНОГО ЛИСТА"
+            elif not factual:
                 status = "План из расчетного листка"
             elif cross:
                 status = "Межресторанная замена"
@@ -937,6 +1011,7 @@ def build_preview_rows_t13_aligned(
                     "employee": employee,
                     "employee_home_restaurant": home_restaurant,
                     "cross_restaurant": cross,
+                    "payroll_correction": payroll_correction,
                     "deficit": False,
                     "status": status,
                 }
@@ -962,6 +1037,7 @@ def build_preview_rows_t13_aligned(
                     "employee": DEFICIT_EMPLOYEE_LABEL,
                     "employee_home_restaurant": "-",
                     "cross_restaurant": False,
+                    "payroll_correction": False,
                     "deficit": True,
                     "status": "ДЕФИЦИТ",
                 }
@@ -980,6 +1056,7 @@ def build_preview_rows_t13_aligned(
                 "employee",
                 "employee_home_restaurant",
                 "cross_restaurant",
+                "payroll_correction",
                 "deficit",
                 "status",
             ]
@@ -1083,32 +1160,43 @@ def _select_employee_days(
     prefer_weekends: bool,
     weekend_days: set[int],
     half_preference: str = "neutral",
+    allowed_days: Optional[set[int]] = None,
+    fixed_days: Optional[set[int]] = None,
 ) -> list[int]:
     if target_count <= 0:
         return []
 
-    factual_unique = sorted(set(int(day) for day in factual_days))
-    selected = _pick_evenly_from_days(factual_unique, min(target_count, len(factual_unique)))
+    allowed = set(int(day) for day in (allowed_days if allowed_days is not None else all_days))
+    fixed = set(int(day) for day in (fixed_days or set()))
+    candidate_all_days = [int(day) for day in all_days if int(day) in allowed or int(day) in fixed]
+    factual_unique = sorted(
+        set(int(day) for day in factual_days if int(day) in allowed or int(day) in fixed)
+    )
+    selected = sorted(fixed)
+    factual_extra = [day for day in factual_unique if day not in selected]
+    selected += _pick_evenly_from_days(factual_extra, min(target_count - len(selected), len(factual_extra)))
+    selected = sorted(set(selected))
 
     if len(selected) < target_count:
-        remaining = [day for day in sorted(set(all_days)) if day not in selected]
+        remaining = [day for day in sorted(set(candidate_all_days)) if day not in selected]
         if prefer_weekends:
             remaining.sort(key=lambda d: (d not in weekend_days, d))
         extras = _pick_evenly_from_days(remaining, target_count - len(selected))
         selected = sorted(set(selected + extras))
-
     if len(selected) > target_count:
         selected = _pick_evenly_from_days(selected, target_count)
 
     # Для core-групп стараемся, чтобы выходных было ощутимо больше, если есть доступные.
     if prefer_weekends and weekend_days and selected:
         weekend_selected = [day for day in selected if day in weekend_days]
-        weekend_available = [day for day in all_days if day in weekend_days]
+        weekend_available = [day for day in candidate_all_days if day in weekend_days]
         min_weekend = min(len(weekend_available), max(1, round(target_count * 0.4)))
 
         if len(weekend_selected) < min_weekend:
             need = min_weekend - len(weekend_selected)
-            replace_from = [day for day in selected if day not in weekend_days]
+            replace_from = [
+                day for day in selected if day not in weekend_days and day not in fixed
+            ]
             replace_to = [day for day in weekend_available if day not in selected]
             replace_to = _pick_evenly_from_days(replace_to, need)
             for idx, day in enumerate(replace_to):
@@ -1124,8 +1212,8 @@ def _select_employee_days(
     # first -> больше дней в 1-15, second -> больше в 16-31.
     preference = str(half_preference or "neutral").strip().lower()
     if preference in {"first", "second"} and selected and target_count > 1:
-        first_half_pool = [day for day in all_days if day <= 15]
-        second_half_pool = [day for day in all_days if day >= 16]
+        first_half_pool = [day for day in candidate_all_days if day <= 15]
+        second_half_pool = [day for day in candidate_all_days if day >= 16]
         selected_first = [day for day in selected if day <= 15]
         selected_second = [day for day in selected if day >= 16]
 
@@ -1140,6 +1228,8 @@ def _select_employee_days(
                 for i, day in enumerate(receiver):
                     if i >= len(donor):
                         break
+                    if donor[i] in fixed:
+                        continue
                     selected.remove(donor[i])
                     selected.append(day)
         else:
@@ -1152,6 +1242,8 @@ def _select_employee_days(
                 for i, day in enumerate(receiver):
                     if i >= len(donor):
                         break
+                    if donor[i] in fixed:
+                        continue
                     selected.remove(donor[i])
                     selected.append(day)
         selected = sorted(set(selected))
@@ -1159,6 +1251,117 @@ def _select_employee_days(
             selected = _pick_evenly_from_days(selected, target_count)
 
     return sorted(selected)
+
+
+def _distribute_hours_constrained(
+    total_hours: float,
+    selected_days: list[int],
+    daily_caps: Optional[dict[int, float]] = None,
+    fixed_work_hours: Optional[dict[int, float]] = None,
+) -> dict[int, float]:
+    caps = {int(day): float(cap) for day, cap in dict(daily_caps or {}).items()}
+    fixed = {
+        int(day): float(hours)
+        for day, hours in dict(fixed_work_hours or {}).items()
+        if int(day) in selected_days
+    }
+    requested_target_cents = int(round(float(total_hours) * 100))
+    cap_cents = {
+        day: int(round(float(caps.get(day, 13.0)) * 100))
+        for day in selected_days
+    }
+    capacity_cents = sum(cap_cents.values())
+    # Правовые ограничения приоритетнее ошибочного итога расчетной ведомости.
+    # Если требуемые часы физически или юридически невозможны, формируем
+    # максимально допустимый табель, а расхождение отмечаем предупреждением.
+    target_cents = min(requested_target_cents, capacity_cents)
+
+    result_cents = {
+        day: min(
+            int(round(float(fixed.get(day, 0.0)) * 100)),
+            cap_cents[day],
+        )
+        for day in selected_days
+    }
+    current_cents = sum(result_cents.values())
+
+    # Расчетная ведомость является приоритетным источником итоговых часов.
+    # Загруженный табель сохраняет рабочие дни и служит начальным распределением.
+    if current_cents > target_cents and current_cents > 0:
+        ratio = target_cents / current_cents
+        scaled = {
+            day: result_cents[day] * ratio
+            for day in selected_days
+        }
+        result_cents = {
+            day: int(scaled[day])
+            for day in selected_days
+        }
+        remainder = target_cents - sum(result_cents.values())
+        by_fraction = sorted(
+            selected_days,
+            key=lambda day: (scaled[day] - result_cents[day], -day),
+            reverse=True,
+        )
+        for day in by_fraction:
+            if remainder <= 0:
+                break
+            if result_cents[day] < cap_cents[day]:
+                result_cents[day] += 1
+                remainder -= 1
+
+    remaining_cents = target_cents - sum(result_cents.values())
+    active_days = [
+        day for day in selected_days
+        if result_cents[day] < cap_cents[day]
+    ]
+    while remaining_cents > 0 and active_days:
+        share = max(1, remaining_cents // len(active_days))
+        next_active: list[int] = []
+        for day in active_days:
+            if remaining_cents <= 0:
+                break
+            available = cap_cents[day] - result_cents[day]
+            addition = min(share, available, remaining_cents)
+            result_cents[day] += addition
+            remaining_cents -= addition
+            if result_cents[day] < cap_cents[day]:
+                next_active.append(day)
+        active_days = next_active
+
+    return {
+        day: round(cents / 100.0, 2)
+        for day, cents in result_cents.items()
+    }
+
+
+def _record_payroll_correction_warning(
+    result: ScheduleResult,
+    employee: str,
+    tab_number: str,
+    payroll_days: int,
+    payroll_hours: float,
+    selected_days: list[int],
+    hours_map: dict[int, float],
+) -> bool:
+    generated_days = len([day for day in selected_days if float(hours_map.get(day, 0.0)) > 0])
+    generated_hours = round(sum(float(hours_map.get(day, 0.0)) for day in selected_days), 2)
+    days_differ = generated_days != int(payroll_days)
+    hours_differ = abs(generated_hours - float(payroll_hours)) > 0.01
+    if not days_differ and not hours_differ:
+        return False
+
+    tab_label = str(tab_number or "").strip() or "не указан"
+    warning = (
+        "ТРЕБУЕТСЯ ПРАВКА РАСЧЕТНОГО ЛИСТА: "
+        f"{employee}, табельный № {tab_label}. "
+        f"В расчетном листе указано {int(payroll_days)} смен / {float(payroll_hours):g} ч.; "
+        f"в законно сформированном табеле возможно {generated_days} смен / {generated_hours:g} ч. "
+        "Проверьте возраст, период работы, отпуск и больничные."
+    )
+    if warning not in result.warnings:
+        result.warnings.append(warning)
+    return True
 
 
 def _build_t13_dataframe(result: ScheduleResult, days: list[int]) -> tuple[pd.DataFrame, dict[str, str]]:
@@ -1194,8 +1397,22 @@ def _build_t13_dataframe(result: ScheduleResult, days: list[int]) -> tuple[pd.Da
     ].copy()
 
     employee_base = (
-        result.employee_summary[["employee", "restaurant", "tab_number", "role", "role_group", "half_preference"]]
-        .drop_duplicates()
+        result.employee_summary[
+            [
+                "employee",
+                "restaurant",
+                "tab_number",
+                "role",
+                "role_group",
+                "half_preference",
+                "allowed_days",
+                "fixed_work_hours",
+                "daily_caps",
+            ]
+        ]
+        .drop_duplicates(
+            subset=["employee", "restaurant", "tab_number", "role", "role_group"]
+        )
         .sort_values(["restaurant", "role", "employee"])
         .reset_index(drop=True)
     )
@@ -1255,6 +1472,15 @@ def _build_t13_dataframe(result: ScheduleResult, days: list[int]) -> tuple[pd.Da
             payroll_days_target = int(pd.to_numeric(summary_row.iloc[0]["max_days"], errors="coerce") or 0)
             payroll_hours_target = float(pd.to_numeric(summary_row.iloc[0]["max_hours"], errors="coerce") or 0.0)
             half_preference = str(summary_row.iloc[0].get("half_preference", half_preference) or half_preference)
+        allowed_days = set(int(day) for day in (row.get("allowed_days", sorted_days) or []))
+        fixed_work_hours = {
+            int(day): float(hours)
+            for day, hours in dict(row.get("fixed_work_hours", {}) or {}).items()
+        }
+        daily_caps = {
+            int(day): float(cap)
+            for day, cap in dict(row.get("daily_caps", {}) or {}).items()
+        }
 
         row_codes: dict[str, Any] = {
             "№ п/п": idx + 1,
@@ -1270,17 +1496,38 @@ def _build_t13_dataframe(result: ScheduleResult, days: list[int]) -> tuple[pd.Da
         }
 
         factual_days = sorted({day for (emp_key, day) in day_details_map.keys() if emp_key == employee})
-        selected_days = _select_employee_days(
-            factual_days=factual_days,
-            all_days=sorted_days,
-            target_count=payroll_days_target,
-            prefer_weekends=_is_core_group(role_group),
-            weekend_days=set(),
-            half_preference=half_preference,
-        )
+        try:
+            selected_days = _select_employee_days(
+                factual_days=factual_days,
+                all_days=sorted_days,
+                target_count=payroll_days_target,
+                prefer_weekends=_is_core_group(role_group),
+                weekend_days=set(),
+                half_preference=half_preference,
+                allowed_days=allowed_days,
+                fixed_days=set(fixed_work_hours),
+            )
 
-        day_hours = _distribute_hours(payroll_hours_target, len(selected_days))
-        hours_map = {day: day_hours[idx] for idx, day in enumerate(selected_days)}
+            hours_map = _distribute_hours_constrained(
+                payroll_hours_target,
+                selected_days,
+                daily_caps=daily_caps,
+                fixed_work_hours=fixed_work_hours,
+            )
+        except ScheduleGenerationError as exc:
+            tab_number = str(row.get("tab_number", "") or "не указан")
+            raise ScheduleGenerationError(
+                f"Сотрудник: {employee}, табельный № {tab_number}. {exc}"
+            ) from exc
+        _record_payroll_correction_warning(
+            result=result,
+            employee=employee,
+            tab_number=str(row.get("tab_number", "") or ""),
+            payroll_days=payroll_days_target,
+            payroll_hours=payroll_hours_target,
+            selected_days=selected_days,
+            hours_map=hours_map,
+        )
 
         cross_days: list[int] = []
 
@@ -1937,8 +2184,14 @@ def _fill_t13_template_sheet(
             "max_days",
             "max_hours",
             "half_preference",
+            "allowed_days",
+            "absence_codes",
+            "fixed_work_hours",
+            "daily_caps",
         ]
-    ].drop_duplicates()
+    ].drop_duplicates(
+        subset=["employee", "restaurant", "tab_number", "role", "role_group"]
+    )
     if filter_restaurant:
         pre_employee_base = pre_employee_base[
             pre_employee_base["restaurant"].astype(str) == str(filter_restaurant)
@@ -2042,6 +2295,19 @@ def _fill_t13_template_sheet(
         half_preference = str(rec.get("half_preference", "neutral") or "neutral")
         payroll_days_target = int(pd.to_numeric(rec["max_days"], errors="coerce") or 0)
         payroll_hours_target = float(pd.to_numeric(rec["max_hours"], errors="coerce") or 0.0)
+        allowed_days = set(int(day) for day in (rec.get("allowed_days", sorted_days) or []))
+        absence_codes = {
+            int(day): str(code)
+            for day, code in dict(rec.get("absence_codes", {}) or {}).items()
+        }
+        fixed_work_hours = {
+            int(day): float(hours)
+            for day, hours in dict(rec.get("fixed_work_hours", {}) or {}).items()
+        }
+        daily_caps = {
+            int(day): float(cap)
+            for day, cap in dict(rec.get("daily_caps", {}) or {}).items()
+        }
 
         r = block_rows[idx]
         _set_cell_value_safe(ws, r, num_col, str(idx + 1))
@@ -2074,16 +2340,36 @@ def _fill_t13_template_sheet(
             }
         else:
             factual_days = sorted({day for (emp_key, day) in details_map.keys() if emp_key == employee})
-            selected_days = _select_employee_days(
-                factual_days=factual_days,
-                all_days=sorted_days,
-                target_count=payroll_days_target,
-                prefer_weekends=_is_core_group(role_group),
-                weekend_days=weekend_days_set,
-                half_preference=half_preference,
-            )
-            day_hours = _distribute_hours(payroll_hours_target, len(selected_days))
-            hours_map = {day: day_hours[pos] for pos, day in enumerate(selected_days)}
+            try:
+                selected_days = _select_employee_days(
+                    factual_days=factual_days,
+                    all_days=sorted_days,
+                    target_count=payroll_days_target,
+                    prefer_weekends=_is_core_group(role_group),
+                    weekend_days=weekend_days_set,
+                    half_preference=half_preference,
+                    allowed_days=allowed_days,
+                    fixed_days=set(fixed_work_hours),
+                )
+                hours_map = _distribute_hours_constrained(
+                    payroll_hours_target,
+                    selected_days,
+                    daily_caps=daily_caps,
+                    fixed_work_hours=fixed_work_hours,
+                )
+            except ScheduleGenerationError as exc:
+                raise ScheduleGenerationError(
+                    f"Сотрудник: {employee}, табельный № {tab_number or 'не указан'}. {exc}"
+                ) from exc
+        _record_payroll_correction_warning(
+            result=result,
+            employee=employee,
+            tab_number=tab_number,
+            payroll_days=payroll_days_target,
+            payroll_hours=payroll_hours_target,
+            selected_days=selected_days,
+            hours_map=hours_map,
+        )
         first_half_days = [day for day in selected_days if day <= 15]
         second_half_days = [day for day in selected_days if day >= 16]
         first_half_days_count = len(first_half_days)
@@ -2132,7 +2418,7 @@ def _fill_t13_template_sheet(
 
             if day not in hours_map:
                 if code_col is not None:
-                    _set_cell_value_safe(ws, code_row, code_col, "В")
+                    _set_cell_value_safe(ws, code_row, code_col, absence_codes.get(day, "В"))
                     _set_cell_comment_safe(ws, code_row, code_col, None)
                 if hours_col is not None:
                     _set_cell_value_safe(ws, hours_row, hours_col, None)
@@ -2319,6 +2605,17 @@ def export_t13_to_excel(
         # оставляем листы по ресторанам + общий.
         if ws in template_wb.worksheets:
             template_wb.remove(ws)
+        if "Предупреждения" in template_wb.sheetnames:
+            template_wb.remove(template_wb["Предупреждения"])
+        warnings_ws = template_wb.create_sheet("Предупреждения")
+        warnings_ws.cell(row=1, column=1, value="Предупреждения и необходимые исправления")
+        warnings_ws.cell(row=1, column=1).font = Font(bold=True, size=12)
+        for warning_idx, warning in enumerate(result.warnings or ["Предупреждений нет."], start=2):
+            warnings_ws.cell(row=warning_idx, column=1, value=warning)
+            warnings_ws.cell(row=warning_idx, column=1).alignment = Alignment(
+                vertical="top", wrap_text=True
+            )
+        warnings_ws.column_dimensions["A"].width = 120
         template_wb.save(output_path)
         return
 

@@ -4,9 +4,29 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT_DIR"
 
+HOST="${HOST:-127.0.0.1}"
+PORT="${PORT:-8000}"
+APP_URL="http://localhost:${PORT}"
+
+open_browser() {
+  if [ "${OPEN_BROWSER:-1}" != "1" ]; then
+    return
+  fi
+
+  (
+    sleep 2
+    if command -v open >/dev/null 2>&1; then
+      open "$APP_URL" >/dev/null 2>&1 || true
+    elif command -v xdg-open >/dev/null 2>&1; then
+      xdg-open "$APP_URL" >/dev/null 2>&1 || true
+    fi
+  ) &
+}
+
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   echo "Starting with Docker..."
-  echo "Open: http://localhost:8000"
+  echo "Open: $APP_URL"
+  open_browser
   exec docker compose up --build
 fi
 
@@ -41,9 +61,8 @@ else
   echo "Dependencies are already installed."
 fi
 
-HOST="${HOST:-0.0.0.0}"
-PORT="${PORT:-8000}"
-echo "Open: http://localhost:${PORT}"
+echo "Open: $APP_URL"
+open_browser
 
 if [ "${DEV_RELOAD:-0}" = "1" ]; then
   exec python3 -m uvicorn app.main:app \
