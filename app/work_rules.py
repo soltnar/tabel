@@ -30,6 +30,37 @@ def normalize_name(value: Any) -> str:
     return re.sub(r"[^а-яa-z]+", " ", text).strip()
 
 
+def names_compatible(left: Any, right: Any) -> bool:
+    """Match a full Russian name with the same name written using initials."""
+    left_parts = normalize_name(left).split()
+    right_parts = normalize_name(right).split()
+    if not left_parts or not right_parts or left_parts[0] != right_parts[0]:
+        return False
+    if len(left_parts) != len(right_parts):
+        return False
+
+    return all(
+        left_part == right_part
+        or left_part.startswith(right_part)
+        or right_part.startswith(left_part)
+        for left_part, right_part in zip(left_parts[1:], right_parts[1:])
+    )
+
+
+def find_unique_name_match(mapping: dict[str, Any], employee: Any) -> Any:
+    """Return a record only when the normalized or initials-based match is unique."""
+    employee_key = normalize_name(employee)
+    if employee_key in mapping:
+        return mapping[employee_key]
+
+    matches = [
+        value
+        for candidate, value in mapping.items()
+        if names_compatible(employee_key, candidate)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 def normalize_tab(value: Any) -> str:
     if value is None or (not isinstance(value, str) and pd.isna(value)):
         return ""

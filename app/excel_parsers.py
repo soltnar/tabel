@@ -13,6 +13,7 @@ import pandas as pd
 
 from app.work_rules import (
     employment_allowed_days,
+    find_unique_name_match,
     infer_timesheet_period,
     minor_daily_cap,
     normalize_name,
@@ -1091,7 +1092,7 @@ def prepare_input(
                 {},
             )
 
-        intervals = personnel_intervals.get(employee_key, [])
+        intervals = find_unique_name_match(personnel_intervals, employee_key) or []
         allowed_days = (
             employment_allowed_days(intervals, year, month)
             if year is not None and month is not None
@@ -1118,6 +1119,18 @@ def prepare_input(
                     # Несовершеннолетних не планируем в выходные и праздники.
                     if day in weekend_days:
                         allowed_days.discard(day)
+
+        invalid_fixed_days = sorted(set(fixed_work_hours) - allowed_days)
+        if invalid_fixed_days:
+            warnings.append(
+                f"{employee}: из ручного табеля исключены явки вне периода работы "
+                f"или в дни отсутствия: {', '.join(map(str, invalid_fixed_days))}."
+            )
+            fixed_work_hours = {
+                int(day): float(hours)
+                for day, hours in fixed_work_hours.items()
+                if int(day) in allowed_days
+            }
 
         register_days = register.get("register_days")
         register_hours = register.get("register_hours")

@@ -102,6 +102,7 @@ class _EmployeeState:
         self.fixed_work_hours = {
             int(day): float(hours)
             for day, hours in dict(row.get("fixed_work_hours", {}) or {}).items()
+            if int(day) in self.allowed_days
         }
         self.absence_codes = {
             int(day): str(code) for day, code in dict(row.get("absence_codes", {}) or {}).items()
@@ -945,6 +946,7 @@ def build_preview_rows_t13_aligned(
         fixed_work_hours = {
             int(day): float(hours)
             for day, hours in dict(rec.get("fixed_work_hours", {}) or {}).items()
+            if int(day) in allowed_days
         }
         daily_caps = {
             int(day): float(cap)
@@ -1167,10 +1169,12 @@ def _select_employee_days(
         return []
 
     allowed = set(int(day) for day in (allowed_days if allowed_days is not None else all_days))
-    fixed = set(int(day) for day in (fixed_days or set()))
-    candidate_all_days = [int(day) for day in all_days if int(day) in allowed or int(day) in fixed]
+    # Ручная правка табеля не может отменять кадровые ограничения:
+    # даты до приема, после увольнения и дни отсутствия всегда исключаются.
+    fixed = set(int(day) for day in (fixed_days or set()) if int(day) in allowed)
+    candidate_all_days = [int(day) for day in all_days if int(day) in allowed]
     factual_unique = sorted(
-        set(int(day) for day in factual_days if int(day) in allowed or int(day) in fixed)
+        set(int(day) for day in factual_days if int(day) in allowed)
     )
     selected = sorted(fixed)
     factual_extra = [day for day in factual_unique if day not in selected]
@@ -1476,6 +1480,7 @@ def _build_t13_dataframe(result: ScheduleResult, days: list[int]) -> tuple[pd.Da
         fixed_work_hours = {
             int(day): float(hours)
             for day, hours in dict(row.get("fixed_work_hours", {}) or {}).items()
+            if int(day) in allowed_days
         }
         daily_caps = {
             int(day): float(cap)
@@ -2303,6 +2308,7 @@ def _fill_t13_template_sheet(
         fixed_work_hours = {
             int(day): float(hours)
             for day, hours in dict(rec.get("fixed_work_hours", {}) or {}).items()
+            if int(day) in allowed_days
         }
         daily_caps = {
             int(day): float(cap)
@@ -2331,36 +2337,42 @@ def _fill_t13_template_sheet(
             tab_col,
             Alignment(horizontal="center", vertical="center", wrap_text=False),
         )
-        assigned_days = sorted({day for (emp_key, day) in day_hours_map.keys() if emp_key == employee})
-        if assigned_days:
-            selected_days = assigned_days
-            hours_map = {
-                day: round(float(day_hours_map.get((employee, day), 0.0)), 2)
-                for day in selected_days
+        assigned_days = sorted(
+            {
+                day
+                for (emp_key, day) in day_hours_map.keys()
+                if emp_key == employee and day in allowed_days
             }
-        else:
-            factual_days = sorted({day for (emp_key, day) in details_map.keys() if emp_key == employee})
-            try:
-                selected_days = _select_employee_days(
-                    factual_days=factual_days,
-                    all_days=sorted_days,
-                    target_count=payroll_days_target,
-                    prefer_weekends=_is_core_group(role_group),
-                    weekend_days=weekend_days_set,
-                    half_preference=half_preference,
-                    allowed_days=allowed_days,
-                    fixed_days=set(fixed_work_hours),
-                )
-                hours_map = _distribute_hours_constrained(
-                    payroll_hours_target,
-                    selected_days,
-                    daily_caps=daily_caps,
-                    fixed_work_hours=fixed_work_hours,
-                )
-            except ScheduleGenerationError as exc:
-                raise ScheduleGenerationError(
-                    f"Сотрудник: {employee}, табельный № {tab_number or 'не указан'}. {exc}"
-                ) from exc
+        )
+        factual_days = sorted(
+            set(assigned_days)
+            | {
+                day
+                for (emp_key, day) in details_map.keys()
+                if emp_key == employee and day in allowed_days
+            }
+        )
+        try:
+            selected_days = _select_employee_days(
+                factual_days=factual_days,
+                all_days=sorted_days,
+                target_count=payroll_days_target,
+                prefer_weekends=_is_core_group(role_group),
+                weekend_days=weekend_days_set,
+                half_preference=half_preference,
+                allowed_days=allowed_days,
+                fixed_days=set(fixed_work_hours),
+            )
+            hours_map = _distribute_hours_constrained(
+                payroll_hours_target,
+                selected_days,
+                daily_caps=daily_caps,
+                fixed_work_hours=fixed_work_hours,
+            )
+        except ScheduleGenerationError as exc:
+            raise ScheduleGenerationError(
+                f"Сотрудник: {employee}, табельный № {tab_number or 'не указан'}. {exc}"
+            ) from exc
         _record_payroll_correction_warning(
             result=result,
             employee=employee,
